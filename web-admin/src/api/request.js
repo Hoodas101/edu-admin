@@ -58,7 +58,9 @@ service.interceptors.response.use(
       switch (response.status) {
         case 401:
           ElMessage.error(response.data?.message || '登录已过期，请重新登录')
+          // 与主动登出对齐：同时清除身份缓存，避免共享电脑残留上一位用户的手机号与权限清单
           localStorage.removeItem('edu_token')
+          localStorage.removeItem('edu_user_info')
           router.push('/login')
           return Promise.reject(new Error(response.data?.message || '登录已过期，请重新登录'))
         case 403:

@@ -60,6 +60,7 @@
       </div>
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadStudents" />
       <el-table v-else
+        v-loading="loading"
         :data="filteredStudents"
         size="small"
         row-key="id"
@@ -759,10 +760,13 @@ const formatCardExpiry = (v) => {
 const isCardExpired = (card) => !!card && card.status === 'active' && !!card.expires_at && Number(card.expires_at) < Date.now() && Number(card.expires_at) < 4102444800000
 
 const error = ref('')
+// 请求序号：慢网下连续搜索/翻页时，旧响应后到会覆盖新结果，回包时比对序号丢弃过期响应
+let loadSeq = 0
 
 const loadStudents = async () => {
   error.value = ''
   loading.value = true
+  const seq = ++loadSeq
   try {
     const res = await getStudents({
       keyword: searchKeyword.value || undefined,
@@ -772,14 +776,16 @@ const loadStudents = async () => {
       page: currentPage.value,
       pageSize: pageSize.value
     })
+    if (seq !== loadSeq) return
     students.value = res.list || []
     totalStudents.value = res.total || 0
   } catch (e) {
+    if (seq !== loadSeq) return
     error.value = e?.message || '数据加载失败，请稍后重试'
     students.value = []
     totalStudents.value = 0
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 

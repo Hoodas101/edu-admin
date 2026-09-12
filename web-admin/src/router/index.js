@@ -88,8 +88,10 @@ router.beforeEach((to, from, next) => {
   if (to.meta.public) {
     // 公开路由直接放行
     next()
-  } else if (token && (role === 'admin' || role === 'coach' || role === 'sales' || role === 'parent')) {
+  } else if (token && (role === 'admin' || role === 'coach' || role === 'sales')) {
     // 已登录用户：按角色或自定义功能权限放行
+    // 注意：不再对 parent 无条件放行——家长端走微信小程序，管理后台面向机构员工；
+    // 此前 parent 兜底可直达 /settings 等所有页面壳（URL 直达绕过菜单隐藏）
     let perms = []
     try {
       perms = JSON.parse(localStorage.getItem('edu_user_info') || '{}').permissions || []
@@ -97,15 +99,14 @@ router.beforeEach((to, from, next) => {
     const allowed = role === 'admin'
       || (to.meta.roles || []).includes(role)
       || (Array.isArray(perms) && to.meta.perm && perms.includes(to.meta.perm))
-      || role === 'parent'  // 家长可访问所有页面（只读）
     if (allowed) {
       next()
     } else {
       // 无权限：回各自默认页
-      next(role === 'coach' ? '/schedule' : role === 'parent' ? '/students' : '/dashboard')
+      next(role === 'coach' ? '/schedule' : '/dashboard')
     }
   } else {
-    // 未登录跳转登录页
+    // 未登录（或家长/未知角色会话）跳转登录页
     next('/login')
   }
 })

@@ -389,7 +389,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="下次跟进时间">
-          <el-date-picker v-model="leadForm.nextFollowAt" type="datetime" placeholder="选择跟进时间" style="width: 100%" value-format="timestamp" />
+          <el-date-picker v-model="leadForm.nextFollowAt" type="datetime" placeholder="选择跟进时间" format="YYYY-MM-DD HH:mm" value-format="x" style="width: 100%" />
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="leadForm.note" type="textarea" :rows="2" placeholder="来源细节、需求、沟通记录" maxlength="200" />
@@ -557,6 +557,7 @@ const errorLeads = ref('')
 const loadLeads = async () => {
   errorLeads.value = ''
   leadLoading.value = true
+  const seq = ++leadsSeq
   try {
     const res = await getLeads({
       page: leadPage.value, pageSize: leadPageSize,
@@ -564,13 +565,15 @@ const loadLeads = async () => {
       stage: leadStage.value || undefined,
       source: leadSource.value || undefined,
     })
+    if (seq !== leadsSeq) return
     leads.value = res?.list || []
     leadTotal.value = res?.total || 0
   } catch (e) {
+    if (seq !== leadsSeq) return
     errorLeads.value = e?.message || '数据加载失败，请稍后重试'
     leads.value = []
   } finally {
-    leadLoading.value = false
+    if (seq === leadsSeq) leadLoading.value = false
   }
 }
 
@@ -696,15 +699,22 @@ const pipelineColumns = computed(() =>
   }))
 )
 
+// 请求序号：防止慢网下旧搜索/翻页响应后到覆盖新结果
+let leadsSeq = 0
+let pipelineSeq = 0
+
 const loadPipeline = async () => {
   pipelineLoading.value = true
+  const seq = ++pipelineSeq
   try {
     const res = await getLeads({ page: 1, pageSize: 100, keyword: leadKeyword.value || undefined, source: leadSource.value || undefined })
+    if (seq !== pipelineSeq) return
     pipelineAll.value = (res?.list || []).filter((l) => l.status !== 'lost')
   } catch (e) {
+    if (seq !== pipelineSeq) return
     pipelineAll.value = []
   } finally {
-    pipelineLoading.value = false
+    if (seq === pipelineSeq) pipelineLoading.value = false
   }
 }
 

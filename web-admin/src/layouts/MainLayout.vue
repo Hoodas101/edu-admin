@@ -375,6 +375,7 @@ const quickInputRef = ref(null)
 const quickStudents = ref([])
 const quickLeads = ref([])
 let quickTimer = null
+let quickSeq = 0
 
 const quickMenus = computed(() => menuRoutes.value)
 const quickMenusFiltered = computed(() => {
@@ -401,14 +402,18 @@ watch(quickQuery, (val) => {
     return
   }
   quickTimer = setTimeout(async () => {
+    // 请求序号防竞态：旧请求后回时丢弃，避免覆盖新关键词的结果
+    const seq = ++quickSeq
     try {
       const [s, l] = await Promise.all([
         getStudents({ keyword: q, page: 1, pageSize: 6 }),
         getLeads({ keyword: q, page: 1, pageSize: 5 }),
       ])
+      if (seq !== quickSeq) return
       quickStudents.value = s?.list || []
       quickLeads.value = l?.list || []
     } catch (e) {
+      if (seq !== quickSeq) return
       quickStudents.value = []
       quickLeads.value = []
     }
@@ -441,6 +446,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
+  clearTimeout(quickTimer) // 布局卸载后不再触发待执行的搜索请求
 })
 
 // 侧边栏折叠状态

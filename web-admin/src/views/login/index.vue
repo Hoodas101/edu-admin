@@ -62,13 +62,9 @@
             </div>
           </div>
 
-          <div
-            v-if="loginForm.role !== 'parent'"
-            class="field-block"
-            :style="{ '--i': 2 }"
-          >
+          <div class="field-block" :style="{ '--i': 2 }">
             <div class="field-label">登录密码</div>
-            <el-form-item prop="password" :rules="loginForm.role !== 'parent' ? passwordRules : []">
+            <el-form-item prop="password" :rules="passwordRules">
               <el-input
                 v-model="loginForm.password"
                 type="password"
@@ -80,15 +76,10 @@
             </el-form-item>
           </div>
 
-          <div v-if="loginForm.role === 'parent'" class="parent-hint">
-            <el-icon :size="14"><InfoFilled /></el-icon>
-            <span>家长端仅需手机号即可登录，无需密码</span>
-          </div>
-
           <el-button
             :loading="loading"
             class="login-btn field-block"
-            :style="{ '--i': loginForm.role !== 'parent' ? 3 : 2 }"
+            :style="{ '--i': 3 }"
             @click="handleLogin"
           >
             {{ loading ? '登录中...' : '登 录' }}
@@ -105,7 +96,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { School, Iphone, UserFilled, Basketball, Setting, Lock, InfoFilled } from '@element-plus/icons-vue'
+import { School, Iphone, UserFilled, Basketball, Setting, Lock } from '@element-plus/icons-vue'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
 
@@ -127,8 +118,7 @@ const loginForm = reactive({
 const roles = [
   { value: 'admin', label: '管理员', icon: Setting },
   { value: 'coach', label: t('instructor'), icon: Basketball },
-  { value: 'sales', label: '销售', icon: UserFilled },
-  { value: 'parent', label: '家长', icon: UserFilled }
+  { value: 'sales', label: '销售', icon: UserFilled }
 ]
 
 const loginRules = {
@@ -152,17 +142,15 @@ const handleLogin = async () => {
     loading.value = true
     try {
       const data = await userStore.login(loginForm)
-      if (data.role !== 'admin' && data.role !== 'coach' && data.role !== 'sales' && data.role !== 'parent') {
-        ElMessage.error('该账号无管理端权限，请联系管理员开通')
+      if (data.role !== 'admin' && data.role !== 'coach' && data.role !== 'sales') {
+        ElMessage.error(data.role === 'parent' ? '家长端请使用微信小程序，管理后台面向机构员工开放' : '该账号无管理端权限，请联系管理员开通')
         userStore.logout()
         return
       }
       ElMessage.success('登录成功')
-      // 管理员/销售默认进看板，教练默认进排期，家长进成员档案
+      // 管理员/销售默认进看板，教练默认进排期
       if (data.role === 'coach') {
         router.push('/schedule')
-      } else if (data.role === 'parent') {
-        router.push('/students')
       } else {
         router.push('/dashboard')
       }
@@ -490,20 +478,6 @@ onMounted(() => {
       color: var(--t-accent-strong);
     }
   }
-}
-
-// ============ 家长提示 ============
-.parent-hint {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 14px;
-  margin-bottom: 26px;
-  border-radius: var(--t-radius-md);
-  background: var(--t-accent-bg);
-  color: var(--t-accent-strong);
-  font-size: var(--t-fs-xs);
-  font-weight: 500;
 }
 
 // ============ 登录按钮 ============

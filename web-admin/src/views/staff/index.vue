@@ -24,7 +24,7 @@
     <!-- 员工表格 -->
     <div class="card table-container">
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadStaff" />
-      <el-table v-else :data="pagedStaff" row-class-name="clickable-row" @row-click="openDetailDrawer" size="small" empty-text="暂无员工">
+      <el-table v-else v-loading="loading" :data="pagedStaff" row-class-name="clickable-row" @row-click="openDetailDrawer" size="small" empty-text="暂无员工">
         <el-table-column label="姓名" min-width="100">
           <template #default="{ row }">
             <span class="staff-name">{{ row.name }}</span>

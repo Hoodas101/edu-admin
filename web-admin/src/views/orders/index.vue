@@ -587,10 +587,13 @@ const formatDate = (v) => {
 }
 
 const error = ref('')
+// 请求序号：防止慢网下旧分页/筛选响应后到覆盖新结果
+let loadSeq = 0
 
 const loadOrders = async () => {
   error.value = ''
   loading.value = true
+  const seq = ++loadSeq
   try {
     const params = {
       page: currentPage.value,
@@ -602,20 +605,23 @@ const loadOrders = async () => {
       params.endDate = dateRange.value[1]
     }
     const res = await getOrders(params)
+    if (seq !== loadSeq) return
     orders.value = res.list || []
     totalOrders.value = res.total || 0
     // 营收统计改为后端汇总接口（覆盖全量订单，净额已扣除退款），解决“只看当前分页 10 行”少算问题
     getOrderStats().then((s) => {
+      if (seq !== loadSeq) return
       todayAmount.value = s.today || 0
       monthAmount.value = s.month || 0
       yearAmount.value = s.year || 0
     }).catch(() => {})
   } catch (e) {
+    if (seq !== loadSeq) return
     error.value = e?.message || '数据加载失败，请稍后重试'
     orders.value = []
     totalOrders.value = 0
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
