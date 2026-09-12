@@ -11,6 +11,9 @@ const login = async (phone, role, pw) => (await (await fetch(BASE + '/auth/login
 const aToken = await login('13800000001', 'admin', '123456')
 const ah = { 'Content-Type': 'application/json', Authorization: `Bearer ${aToken}` }
 const acall = async (path, opts = {}) => (await fetch(BASE + path, { method: opts.m || 'GET', headers: ah, body: opts.b ? JSON.stringify(opts.b) : undefined })).json()
+// 家长身份：后端已不信任 x-openid 头（身份只认 JWT），报名/首页数据须携带家长 token
+const pToken = (await (await fetch(BASE + '/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: '13900000001', role: 'parent' }) })).json()).data.token
+const pH = { 'Content-Type': 'application/json', Authorization: `Bearer ${pToken}` }
 
 // 1. 工作台展开数据（dashboard 全字段）
 const dash = await acall('/admin/dashboard')
@@ -31,9 +34,9 @@ assert('修改后字段生效', detail.data.date === '2034-06-02' && detail.data
 const d = new Date(); const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 const sch2 = await acall('/schedules', { m: 'POST', b: { courseId: _course.data.id, date: today, startTime: '14:00', endTime: '15:00', teacherId: 'teacher_001', maxStudents: 10 } })
 // 报名 + 签到一个
-await fetch(BASE + `/schedules/${sch2.data.id}/enroll`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-openid': 'phone_13900000001' }, body: JSON.stringify({ studentId: 'stu_001' }) })
+await fetch(BASE + `/schedules/${sch2.data.id}/enroll`, { method: 'POST', headers: { ...pH }, body: JSON.stringify({ studentId: 'stu_001' }) })
 await acall('/checkin/teacher', { m: 'POST', b: { scheduleId: sch2.data.id, attendances: [{ studentId: 'stu_001', status: 'present' }] } })
-const home = await fetch(BASE + '/students/home/data', { headers: { 'x-openid': 'phone_13900000001' } }).then((r) => r.json())
+const home = await fetch(BASE + '/students/home/data', { headers: pH }).then((r) => r.json())
 const tc = (home.data.todayClasses || []).find((c) => c.id === sch2.data.id)
 assert('今日活动含已签到人数', tc && tc.checkedInCount === 1, JSON.stringify(tc && tc.checkedInCount))
 

@@ -33,6 +33,7 @@ db.prepare(`INSERT INTO parent_bindings (student_id,student_name,parent_name,par
 const courseId = uid('crs_lv')
 db.prepare(`INSERT INTO courses (id,name,category,duration,is_active,created_at,archived) VALUES (?,?,?,60,1,?,0)`).run(courseId, '测试课程', '测试', now)
 const schedId = uid('sch_lv')
+const createdSchedIds = []
 db.prepare(`INSERT INTO schedules (id,course_id,course_name,teacher_name,date,start_time,end_time,max_students,enrolled_count,status,is_recursive,created_at,updated_at)
   VALUES (?,?,?,?,?,?,?,?,0,'scheduled',0,?,?)`).run(schedId, courseId, '测试训练', '何教练', todayStr(), '19:00', '20:00', 30, now, now)
 
@@ -53,11 +54,17 @@ async function setLeaveRules(rules) {
   return r.json()
 }
 async function approveLeave(mode) {
-  // insert leave request directly
+  // 每个场景新建独立排期：请假扣课幂等按 (schedule_id, student_id) 记日志，
+  // 复用同一排期会让第 2 个场景起被判定「已扣过」而静默跳过
   const lid = uid('lv_')
+  const sId = uid('sch_lv')
+  const endH = Math.min(23, 20 + createdSchedIds.length)
+  db.prepare(`INSERT INTO schedules (id,course_id,course_name,teacher_name,date,start_time,end_time,max_students,enrolled_count,status,is_recursive,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,30,0,'scheduled',0,?,?)`).run(sId, courseId, '测试训练', '何教练', todayStr(), `${endH}:00`, `${Math.min(23, endH + 1)}:30`, now, now)
+  createdSchedIds.push(sId)
   db.prepare(`INSERT INTO leave_requests (id,student_id,student_name,schedule_id,course_name,date,start_time,reason,status,parent_openid,parent_phone,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,'pending',?, '', ?, ?)`).run(
-    lid, STUDENT_ID, '请假测试学员', schedId, '测试训练', todayStr(), '19:00', '测试请假', PARENT_OPENID, now, now)
+    lid, STUDENT_ID, '请假测试学员', sId, '测试训练', todayStr(), '19:00', '测试请假', PARENT_OPENID, now, now)
   const r = await fetch(BASE + '/leave/' + lid + '/approve', { method: 'PUT', headers: H, body: JSON.stringify({ action: 'approve', note: 'ok' }) })
   return { id: lid, ...(await r.json()) }
 }
@@ -120,7 +127,8 @@ try {
   for (const t of ['leave_requests', 'attendances', 'point_logs', 'points', 'member_cards', 'enrollments', 'parent_bindings']) {
     try { db.prepare('DELETE FROM ' + t + ' WHERE student_id=?').run(STUDENT_ID) } catch (e) { /* ignore */ }
   }
-  try { db.prepare('DELETE FROM schedules WHERE id=?').run(schedId) } catch (e) {}
+  try { db.prepare('DELETE FROM schedules WHERE id IN (' + [schedId, ...createdSchedIds].map(() => '?').join(',') + ')').run(schedId, ...createdSchedIds) } catch (e) {}
+  try { db.prepare('DELETE FROM leave_deduction_logs WHERE student_id=?').run(STUDENT_ID) } catch (e) {}
   try { db.prepare('DELETE FROM courses WHERE id=?').run(courseId) } catch (e) {}
   try { db.prepare('DELETE FROM students WHERE id=?').run(STUDENT_ID) } catch (e) {}
   await setLeaveRules(ORIG_RULES)

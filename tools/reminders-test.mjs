@@ -31,7 +31,8 @@ await j('/schedules/' + sid + '/enroll', { m: 'POST', headers: PH, b: { studentI
 // 2. 调用训练提醒生成逻辑
 const r1 = generateClassReminders(Date.now())
 assert('训练提醒生成通知', r1.sent >= 1, JSON.stringify(r1))
-const notice = (await j('/notifications/list?limit=10', { headers: PH })).body.data.find(n => (n.title || '').includes('训练即将开始') && (n.detail || n.content || '').includes(name))
+// 标题跟随机构称呼方案（edu=课程即将开始 / fitness=训练即将开始），只匹配「即将开始」
+const notice = (await j('/notifications/list?limit=10', { headers: PH })).body.data.find(n => (n.title || '').includes('即将开始') && (n.detail || n.content || '').includes(name))
 assert('家长收到训练提醒', !!notice, '未收到训练提醒')
 
 // 3. 幂等：再次调用不重复生成

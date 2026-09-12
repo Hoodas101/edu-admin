@@ -28,6 +28,8 @@ const auditScheds = db.prepare(`
      OR course_name LIKE '%扣课%' OR course_name LIKE '%验证课%'
      OR course_name LIKE '重复测试-%' OR course_name LIKE '复查-%'
      OR course_name LIKE '家长签到测试%'
+     OR course_name LIKE '%管理端深化测试课%' OR course_name LIKE '%管理端签到测试课%'
+     OR course_name LIKE '%全面测试课程%' OR course_name LIKE '%冒烟测试班级%'
 `).all()
 if (auditScheds.length) {
   const ph = auditScheds.map(() => '?').join(',')
@@ -48,6 +50,33 @@ const genderRemain = db.prepare(`SELECT count(*) c FROM students WHERE gender NO
   db.prepare(`SELECT count(*) c FROM teachers WHERE gender NOT IN ('男','女')`).get().c
 if (genderRemain > 0) { console.log(`✗ 性别字段存在异常值 ${genderRemain} 条`); issues++ }
 else console.log(`✓ 性别数据归一化（male/female → 男/女，修正 ${genderFix.changes} 条）`)
+
+// 学生数据卫生：清理自动化测试残留学员。DELETE /students/:id 是软删除（status='refunded'），
+// 全面测试/签到测试等套件跑完后学员行仍留在库里，按 created_at DESC 会占据成员列表首位，污染演示数据。
+// 连同其全部关联数据（卡/报名/考勤/积分/绑定/请假/扣课/订单/支付）一并物理删除。
+const testStudents = db.prepare(`
+  SELECT id FROM students
+  WHERE name LIKE '全面测试学生_%' OR name LIKE '签到测试学生_%' OR name LIKE '测试学生_%'
+     OR name IN ('测试学员', '请假测试学员')
+`).all()
+if (testStudents.length) {
+  const ph = testStudents.map(() => '?').join(',')
+  const sids = testStudents.map((s) => s.id)
+  const tOrderIds = db.prepare(`SELECT id FROM orders WHERE student_id IN (${ph})`).all(...sids).map((o) => o.id)
+  if (tOrderIds.length) {
+    const oph = tOrderIds.map(() => '?').join(',')
+    db.prepare(`DELETE FROM payments WHERE order_id IN (${oph})`).run(...tOrderIds)
+    db.prepare(`DELETE FROM member_cards WHERE order_id IN (${oph})`).run(...tOrderIds)
+  }
+  for (const t of ['member_cards', 'enrollments', 'attendances', 'point_logs', 'parent_bindings',
+    'leave_requests', 'orders', 'points', 'deduction_logs', 'leave_deduction_logs', 'coach_comments', 'student_class']) {
+    try { db.prepare(`DELETE FROM ${t} WHERE student_id IN (${ph})`).run(...sids) } catch (e) { /* 表无该列时跳过 */ }
+  }
+  db.prepare(`DELETE FROM students WHERE id IN (${ph})`).run(...sids)
+  console.log(`✓ 学生数据卫生（自动清理测试学员 ${testStudents.length} 人）`)
+} else {
+  console.log('✓ 学生数据卫生（无测试学员残留）')
+}
 
 // 自动清理自动化测试创建的销售订单（测试签单人 / E2E / AUDIT 备注）及其关联数据，
 // 防止测试订单污染演示销售数据与会员卡
@@ -79,6 +108,8 @@ else console.log(`✓ 课程数据卫生（残留 ${courses} 条）`)
 // 自动清理自动化测试创建的临时课程（优化验证课等）及其关联数据，防止演示数据污染
 const tempCourses = db.prepare(`
   SELECT id FROM courses WHERE name LIKE '优化验证课%' OR name LIKE '自动化测试课%' OR name LIKE '验证课%'
+     OR name LIKE '%管理端深化测试课%' OR name LIKE '%管理端签到测试课%'
+     OR name LIKE '全面测试课程%' OR name LIKE '冒烟测试班级%'
 `).all()
 if (tempCourses.length) {
   const ph = tempCourses.map(() => '?').join(',')

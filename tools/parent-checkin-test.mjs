@@ -18,11 +18,15 @@ const AH = { Authorization: 'Bearer ' + A.token }
 const P = (await j('/auth/login', { m: 'POST', b: { phone: '13900000001', role: 'parent' } })).body.data
 const PH = { Authorization: 'Bearer ' + P.token }
 
-// 1. 管理员创建排期(明天,唯一名称)
-const tomorrow = new Date(Date.now() + 86400000)
-const dateStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`
+// 1. 管理员创建排期(现在开始 1 小时后，落在扫码签到窗口 [start-2h, end+2h] 内)
+//    日期取 start 所在日：夜间 23 点后运行时 +1h 会跨零点，用「今天」会建成已结束的排期
+const start = new Date(Date.now() + 3600000)
+const end = new Date(Date.now() + 7200000)
+const pad = (x) => String(x).padStart(2, '0')
+const dateStr = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`
+const timeStr = (x) => `${pad(x.getHours())}:${pad(x.getMinutes())}`
 const name = '家长签到测试-' + Date.now().toString(36).slice(-4)
-const sched = await j('/schedules', { m: 'POST', headers: AH, b: { courseName: name, date: dateStr, startTime: '18:00', endTime: '19:00' } })
+const sched = await j('/schedules', { m: 'POST', headers: AH, b: { courseName: name, date: dateStr, startTime: timeStr(start), endTime: timeStr(end) } })
 assert('创建测试排期', sched.body.code === 0, sched.body.message)
 const sid = sched.body.data.id
 

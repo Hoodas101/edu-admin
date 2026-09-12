@@ -11,6 +11,9 @@ const login = async (phone, role, pw) => (await (await fetch(BASE + '/auth/login
 const aToken = await login('13800000001', 'admin', '123456')
 const ah = { 'Content-Type': 'application/json', Authorization: `Bearer ${aToken}` }
 const acall = async (path, opts = {}) => (await fetch(BASE + path, { method: opts.m || 'GET', headers: ah, body: opts.b ? JSON.stringify(opts.b) : undefined })).json()
+// 家长身份：后端已不信任 x-openid 头（身份只认 JWT），报名/首页数据须携带家长 token
+const pToken = (await (await fetch(BASE + '/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: '13900000001', role: 'parent' }) })).json()).data.token
+const pH = { 'Content-Type': 'application/json', Authorization: `Bearer ${pToken}` }
 
 // 1-2. 创建当天活动（管理员）→ 首页字段验证
 const _d = new Date(); const today = `${_d.getFullYear()}-${String(_d.getMonth() + 1).padStart(2, '0')}-${String(_d.getDate()).padStart(2, '0')}`
@@ -20,10 +23,9 @@ const course = { id: _created.data.id }
 const date = today
 const created = await acall('/schedules', { m: 'POST', b: { courseId: course.id, date, startTime: '10:00', endTime: '11:00', teacherId: 'teacher_001', maxStudents: 10 } })
 assert('添加活动成功', created.code === 0, JSON.stringify(created))
-const home = await fetch(BASE + '/students/home/data', { headers: { 'x-openid': 'phone_13900000001' } }).then((r) => r.json())
+const home = await fetch(BASE + '/students/home/data', { headers: pH }).then((r) => r.json())
 const tc = (home.data.todayClasses || []).find((c) => c.id === created.data.id)
 assert('首页活动含 maxStudents/教练/报名人数', tc && tc.maxStudents !== undefined && tc.coach !== undefined && tc.enrolledCount !== undefined, JSON.stringify(tc && { ms: tc.maxStudents, coach: tc.coach, ec: tc.enrolledCount }))
-assert('添加活动成功', created.code === 0, JSON.stringify(created))
 const schId = created.data.id
 
 // 3. 详情页数据字段（紧凑卡所需）
@@ -33,18 +35,18 @@ assert('详情含完整字段', detail.code === 0 && detail.data.course_name && 
 // 4. 取消训练 → 级联报名取消 + 名额归零
 const before = await acall('/schedules/my')
 // 先给该活动报名一个学生
-await fetch(BASE + `/schedules/${schId}/enroll`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-openid': 'phone_13900000001' }, body: JSON.stringify({ studentId: 'stu_001' }) })
+await fetch(BASE + `/schedules/${schId}/enroll`, { method: 'POST', headers: { ...pH }, body: JSON.stringify({ studentId: 'stu_001' }) })
 const cancel = await acall('/schedules/' + schId, { m: 'DELETE' })
 assert('取消训练成功', cancel.code === 0, JSON.stringify(cancel))
 const after = await acall('/schedules/' + schId)
 assert('取消后状态 cancelled', after.code === 0 && after.data.status === 'cancelled', JSON.stringify(after.data && after.data.status))
-const afterHome = await fetch(BASE + '/students/home/data', { headers: { 'x-openid': 'phone_13900000001' } }).then((r) => r.json())
+const afterHome = await fetch(BASE + '/students/home/data', { headers: pH }).then((r) => r.json())
 assert('取消的活动不再出现在首页', !(afterHome.data.todayClasses || []).some((c) => c.id === schId))
 
 // 4.1 PUT 取消活动同样级联取消报名并清零人数(与 DELETE 行为一致)
 const sch2 = await acall('/schedules', { m: 'POST', b: { courseId: course.id, date: '2026-08-20', startTime: '10:00', endTime: '11:00', teacherId: 'teacher_001', maxStudents: 10 } })
 const sch2Id = sch2.data.id
-await fetch(BASE + `/schedules/${sch2Id}/enroll`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-openid': 'phone_13900000001' }, body: JSON.stringify({ studentId: 'stu_001' }) })
+await fetch(BASE + `/schedules/${sch2Id}/enroll`, { method: 'POST', headers: { ...pH }, body: JSON.stringify({ studentId: 'stu_001' }) })
 const putCancel = await acall('/schedules/' + sch2Id, { m: 'PUT', b: { status: 'cancelled' } })
 assert('PUT 取消活动成功', putCancel.code === 0, JSON.stringify(putCancel))
 const _db2 = await import('node:child_process')
@@ -54,14 +56,18 @@ const _cnt = _db2.execSync(`sqlite3 ${__ROOT}/backend/db/data.db "SELECT enrolle
 assert('PUT 取消人数清零', _cnt === '0', `count=${_cnt}`)
 _db2.execSync(`sqlite3 ${__ROOT}/backend/db/data.db "DELETE FROM enrollments WHERE schedule_id='${sch2Id}'; DELETE FROM schedules WHERE id='${sch2Id}';"`)
 
-// 5. 教练权限：教练不能添加活动
+// 5. 教练课务权限：单条排课教练可建（与路由契约「仅管理员或教练可创建排期」及教练课务职责一致），
+//    周期性排课仍限管理员
 const cToken = await login('13800000011', 'coach', '123456')
 const cadd = await fetch(BASE + '/schedules', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cToken}` }, body: JSON.stringify({ courseId: course.id, date: '2032-05-11', startTime: '10:00', endTime: '11:00' }) })
-assert('教练添加活动被拒', cadd.status === 403, `status=${cadd.status}`)
+const caddBody = await cadd.json()
+assert('教练可创建单条排期', cadd.status === 200 && caddBody.code === 0, `status=${cadd.status}`)
+const cres = await fetch(BASE + '/schedules/recursive', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cToken}` }, body: JSON.stringify({ courseId: course.id, startTime: '10:00', endTime: '11:00', startDate: '2032-05-12', endDate: '2032-05-19' }) })
+assert('教练创建周期排课被拒', cres.status === 403, `status=${cres.status}`)
 
 // 清理
 const _db = await import('node:child_process')
-_db.execSync(`sqlite3 ${__ROOT}/backend/db/data.db "DELETE FROM enrollments WHERE schedule_id='${schId}'; DELETE FROM attendances WHERE schedule_id='${schId}'; DELETE FROM schedules WHERE id='${schId}';"`)
+_db.execSync(`sqlite3 ${__ROOT}/backend/db/data.db "DELETE FROM enrollments WHERE schedule_id IN (SELECT id FROM schedules WHERE course_id='${course.id}'); DELETE FROM attendances WHERE schedule_id IN (SELECT id FROM schedules WHERE course_id='${course.id}'); DELETE FROM schedules WHERE course_id='${course.id}';"`)
 await acall('/admin/courses/' + course.id, { m: 'DELETE' }).catch(() => {})
 console.log(`\n结果：${ok} 通过 / ${fail} 失败`)
 process.exit(fail ? 1 : 0)
