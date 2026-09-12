@@ -16,7 +16,8 @@
 - `tools/dark-mode-audit.mjs`：像素级深浅色双模式审计（--theme dark|light）
 - Docker 一键部署：单镜像（API + 管理后台）、compose 编排、
   Caddy 自动 HTTPS 边车、`deploy/deploy.sh` 与 GitHub Actions Deploy 工作流
-- CI（GitHub Actions）：后端 256 项回归 × Node 18/20/22、
+- CI（GitHub Actions）：后端 4 个专项套件 × Node 18/20/22（256 项全量回归
+  为本地门禁 `npm run test:backend`）、
   管理端构建、镜像构建冒烟、敏感信息与运行数据门禁
 - 社区文档：贡献指南、安全策略、行为准则
 - 微信小程序三端（家长 / 教练 / 管理员，41 页原生实现）
