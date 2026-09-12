@@ -51,7 +51,15 @@ const staffRead = (req, res, next) => {
  * GET /api/admin/dashboard — 数据看板
  * 返回核心运营指标：成员数、今日课表、今日签到、今日订单、即将到期卡、到场率
  */
-router.get('/dashboard', (req, res) => {
+router.get('/dashboard', (req, res, next) => {
+  // 看板含全机构收入/订单等经营数据：仅管理员或显式拥有 dashboard 权限的员工（销售）可见。
+  // 顶部 guard 按教练角色放行是给课务参考数据（teachers/courses 下拉）用的，
+  // 不代表教练可读财务报表；Web 路由与小程序 hasPerm('dashboard') 均按权限判定，后端补齐同一契约。
+  if (!isAdminReq(req) && !hasPerm(getReqUser(req), 'dashboard')) {
+    return res.status(403).json({ code: 403, data: null, message: '无权限查看数据看板' });
+  }
+  next();
+}, (req, res) => {
   try {
     const today = formatDate(now());
     const currentTime = now();
@@ -769,15 +777,15 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, '', ?, ?, 'active', ?, ?)
       `).run(generateId('user_'), `phone_${targetPhone}`, targetPhone, name || existing.name, role,
-        hashPassword('123456'), now(), now());
+        hashPassword(STAFF_DEFAULT_PASSWORD), now(), now());
     }
 
-    // 重置登录密码为默认密码
+    // 重置登录密码为初始密码（STAFF_DEFAULT_PASSWORD 可配，默认 123456）
     if (resetPassword) {
       const targetPhone = newPhone || oldPhone;
       if (targetPhone) {
         db.prepare("UPDATE users SET password = ?, updated_at = ? WHERE phone = ?")
-          .run(hashPassword('123456'), now(), targetPhone);
+          .run(hashPassword(STAFF_DEFAULT_PASSWORD), now(), targetPhone);
       }
     }
     res.json(success({ id: req.params.id }));
@@ -1083,6 +1091,11 @@ module.exports = router;
  * @param {string} phone
  * @param {string} name
  */
+// 员工初始/重置密码：可通过 STAFF_DEFAULT_PASSWORD 环境变量改为机构自定义初始密码。
+// 硬编码 123456 意味着任何拿到 MIT 源码的人都可尝试「已知手机号 + 123456」接管员工账号；
+// 正式部署务必设置自定义值，并在创建员工后通过私密渠道告知本人尽快修改。
+const STAFF_DEFAULT_PASSWORD = process.env.STAFF_DEFAULT_PASSWORD || '123456';
+
 function syncCoachAccount(phone, name) {
   if (!phone) return;
   const existing = db.prepare('SELECT id, role FROM users WHERE phone = ?').get(phone);
@@ -1094,7 +1107,7 @@ function syncCoachAccount(phone, name) {
     db.prepare(`
       INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, '', 'coach', ?, 'active', ?, ?)
-    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword('123456'), now(), now());
+    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(STAFF_DEFAULT_PASSWORD), now(), now());
   }
 }
 

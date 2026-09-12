@@ -389,6 +389,9 @@ router.post('/deduct', (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可扣课'));
     const { scheduleId, studentId, cardId, classes = 1 } = req.body;
     if (!scheduleId || !studentId) return res.json(fail('缺少参数'));
+    // 扣课数量必须为正整数：负数会把「扣课」变成反向充值（remaining - (-N) = +N），凭空膨胀课时资产
+    const n = Number(classes);
+    if (!Number.isInteger(n) || n <= 0) return res.json(fail('扣课数量必须为正整数'));
 
     // 幂等检查
     const existing = db.prepare(
@@ -416,12 +419,12 @@ router.post('/deduct', (req, res) => {
     }
 
     // 查找可用会员卡
-    if (card.remaining_classes < classes) return res.json(fail('剩余训练时长不足'));
+    if (card.remaining_classes < n) return res.json(fail('剩余训练时长不足'));
 
     // 扣课
     db.prepare(`
       UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ? WHERE id = ?
-    `).run(classes, classes, now(), card.id);
+    `).run(n, n, now(), card.id);
 
     // 记录扣课日志
     db.prepare(`
@@ -435,7 +438,7 @@ router.post('/deduct', (req, res) => {
       mode: 'count',
       remainingClasses: updatedCard.remaining_classes,
       usedClasses: updatedCard.used_classes,
-      deducted: classes,
+      deducted: n,
     }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));

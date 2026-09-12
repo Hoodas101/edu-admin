@@ -94,7 +94,7 @@ if [[ "$HTTPS" -eq 1 ]]; then
   DOMAIN="$HOST" docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d --build
 else
   echo "[docker] 启动 app（http://${HOST}:${PORT}）"
-  docker compose up -d --build
+  APP_PORT="$PORT" docker compose up -d --build
 fi
 
 # ---- 数据库引导 -------------------------------------------------------------------
@@ -125,7 +125,7 @@ done
 if [[ "$HTTPS" -eq 1 ]]; then
   BASE="https://$HOST"
 else
-  BASE="http://$HOST"
+  BASE="http://$HOST:$PORT"
 fi
 cat <<EOF
 

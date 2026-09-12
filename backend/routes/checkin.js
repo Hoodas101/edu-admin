@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, formatDate, isCoachReq, isAdminReq, canViewStudentData } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, formatDate, isCoachReq, isAdminReq, isStaffReq, canViewStudentData } = require('../utils');
 
 /**
  * POST /api/checkin/teacher — 教师批量签到确认
@@ -334,6 +334,11 @@ router.post('/parent', (req, res) => {
 router.get('/records', (req, res) => {
   try {
     const { studentId, scheduleId, date, month, status } = req.query;
+    // 不带 studentId 时为全机构查询，仅限管理端工作人员；
+    // 家长必须带 studentId 走下方归属校验，否则可读全机构出勤明细（横向越权）
+    if (!studentId && !isStaffReq(req)) {
+      return res.status(403).json(safeFail('无权查看全部签到记录'));
+    }
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
     const offset = (page - 1) * pageSize;
@@ -375,6 +380,10 @@ router.get('/today', (req, res) => {
   try {
     const today = formatDate(now());
     const { studentId } = req.query;
+    // 不带 studentId 时为全机构今日状态，仅限管理端工作人员（同 /records 防横向越权）
+    if (!studentId && !isStaffReq(req)) {
+      return res.status(403).json(safeFail('无权查看全部签到状态'));
+    }
 
     let where = 'WHERE a.date = ?';
     const params = [today];

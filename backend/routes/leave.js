@@ -57,11 +57,11 @@ function applyLeaveDeduction(studentId, scheduleId, currentTime) {
   if (rules.deductMode === 'none' || !rules.deductAmount) return { deducted: false };
 
   if (rules.deductMode === 'class') {
-    // 扣课时：只扣次数卡，优先扣到期最近的
+    // 扣课时：只扣次数卡，优先扣到期最近的（DESC 会把新购卡先扣掉，与契约相反）
     const card = db.prepare(`
       SELECT * FROM member_cards
       WHERE student_id = ? AND status = 'active' AND billing_mode = 'count' AND remaining_classes > 0
-      ORDER BY expires_at DESC LIMIT 1
+      ORDER BY expires_at ASC LIMIT 1
     `).get(studentId);
     if (!card) return { deducted: false, reason: 'no_count_card' };
     const before = card.remaining_classes;

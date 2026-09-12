@@ -16,6 +16,7 @@ backend.pid
 webadmin.pid
 backend/backups/
 backend/db/data.db*
+backend/db/.jwt-secret
 backend/data.db
 backend/uploads/
 tools/uitest/

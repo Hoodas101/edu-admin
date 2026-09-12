@@ -4,18 +4,35 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-// === 密钥配置（生产环境必须通过环境变量设置，禁止使用默认密钥）===
-const DEFAULT_SECRET = 'change-this-jwt-secret-before-deploy';
-const JWT_SECRET = process.env.JWT_SECRET || DEFAULT_SECRET;
-if (JWT_SECRET === DEFAULT_SECRET) {
-  // 默认密钥硬编码在源码中，任何拿到代码的人都能伪造登录凭证。
-  // 生产环境直接拒绝启动；开发/测试环境也给出醒目警告，部署前必须设置 JWT_SECRET。
-  console.error('\n[安全警告] 正在使用默认 JWT_SECRET，存在登录凭证伪造风险！\n请在启动前设置强随机密钥：export JWT_SECRET=$(openssl rand -hex 32)\n');
-  if (process.env.NODE_ENV === 'production') process.exit(1);
+// === 密钥配置 ===
+// 绝不使用硬编码默认密钥（历史版本回退到公开值，任何拿到 MIT 源码的人都能
+// 伪造管理员 token）。未显式配置 JWT_SECRET 时：首次启动生成密码学随机密钥
+// 并持久化到 data.db 同目录（随数据卷备份、跨重启稳定），此后一直复用。
+// 多实例横向扩展部署仍应显式设置 JWT_SECRET 环境变量，让各实例共享同一密钥。
+const SECRET_FILE = path.join(__dirname, '../db/.jwt-secret');
+function resolveJwtSecret() {
+  const env = process.env.JWT_SECRET;
+  if (env) return env;
+  try {
+    const existing = fs.readFileSync(SECRET_FILE, 'utf8').trim();
+    if (existing) return existing;
+  } catch (e) { /* 文件不存在，下面生成 */ }
+  const fresh = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(SECRET_FILE, fresh, { mode: 0o600 });
+    console.log('[安全] 未设置 JWT_SECRET，已生成随机密钥并持久化到 backend/db/.jwt-secret（请随数据库一起备份）');
+  } catch (e) {
+    // 文件系统只读等异常场景：退化为进程内存密钥（重启后所有登录态失效，但不伪造风险）
+    console.warn('[安全] 无法持久化 JWT_SECRET（文件系统限制），本次使用内存密钥，重启后所有登录态将失效');
+  }
+  return fresh;
 }
+const JWT_SECRET = resolveJwtSecret();
 const TOKEN_EXPIRY = '7d'; // 7 天（jsonwebtoken 标准格式）
 const BCRYPT_ROUNDS = 10;  // bcrypt 计算轮数（10 ≈ ~100ms，安全与性能的平衡点）
 
@@ -355,6 +372,7 @@ function getActor(req) {
 const { recordAudit } = require('./audit');
 
 module.exports = {
+  JWT_SECRET,
   generateId,
   hashPassword,
   verifyPassword,

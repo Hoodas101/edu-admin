@@ -305,6 +305,12 @@ router.post('/:id/pay', (req, res) => {
       if (!owned) return res.status(403).json(safeFail('无权操作该订单'));
     }
     if (order.status === 'cancelled' || order.status === 'refunded') return res.json(fail('订单已取消或已退款'));
+    // 家长自助「模拟支付」开关：真实微信支付接入后应设置 SIMULATED_PAY_DISABLED=1，
+    // 关闭待支付订单的自助标记已付通道（否则家长可把销售挂起的欠款单直接置为已付，
+    // 白得会员卡与赠送积分，资金流水与实收脱钩）。管理员仍可正常操作。
+    if (!isAdminReq(req) && process.env.SIMULATED_PAY_DISABLED === '1') {
+      return res.status(403).json(safeFail('该机构未开放自助支付，请联系机构收银'));
+    }
 
     const currentTime = now();
     // 事务内原子抢占：仅当订单仍为 pending 时置为 paid，影响行数=0 即说明已被其他并发请求处理，避免重复激活/重复赠分
@@ -524,6 +530,9 @@ router.put('/:id', (req, res) => {
     if (payableAmount !== undefined) {
       const amount = Number(payableAmount);
       if (!isFinite(amount) || amount < 0) return res.json(fail('金额不合法'));
+      // 不得低于已退金额：否则净营收统计与退款上限校验口径全部失真
+      const refundedSoFar = Number(order.refunded_amount) || 0;
+      if (amount < refundedSoFar) return res.json(fail(`金额不能低于已退款金额 ¥${refundedSoFar}`));
       fields.push('payable_amount = ?');
       params.push(amount);
       // 同步支付记录金额

@@ -2,6 +2,7 @@
  * 提醒定时任务核心逻辑（纯函数，便于自动化测试）
  * 训练开始前提醒 / 续费提醒 / 低课时提醒 的生成逻辑
  */
+const crypto = require('crypto');
 const db = require('../db');
 const { now } = require('./index');
 const { getTerms, applyTerms } = require('./terms');
@@ -63,11 +64,14 @@ function generateClassReminders(nowMs = Date.now()) {
     );
     const title = applyTerms('{{course}}即将开始', terms);
     for (const p of parents) {
+      // 通知 ID 用 openid 哈希后缀：直接截断明文会把长微信 openid（wx + 28 位）切掉，
+      // 同活动下多个家长 ID 前缀相同 → 主键冲突，只建出第一条提醒
+      const idSuffix = crypto.createHash('sha1').update(p.parent_openid).digest('hex').slice(0, 12);
       db.prepare(`
         INSERT INTO notifications (id, user_id, title, content, priority, category, summary, template_id, channel, status, is_broadcast, sent_at, created_at)
         VALUES (?, ?, ?, ?, 'normal', 'schedule', ?, ?, 'inapp', 'sent', 0, ?, ?)
       `).run(
-        `NTF_${key}_${p.parent_openid}`.slice(0, 64).toUpperCase(),
+        `NTF_${key}_${idSuffix}`.toUpperCase().slice(0, 64),
         p.parent_openid,
         title,
         content,

@@ -8,8 +8,8 @@ name: Deploy
 #      工作流通过 SSH 连接服务器（私钥来自仓库 Secrets 中的 SSH_PRIVATE_KEY）。
 #   2. 服务器上：缺 Docker 则自动安装 → 克隆本仓库 → 执行 ./deploy/deploy.sh
 #      （构建镜像、启动应用、初始化 SQLite 架构、可选灌示例数据）。
-#   3. 完成后管理后台即在 http://<host>/ 可访问（勾选 HTTPS 并给真实域名
-#      则为 https://）。
+#   3. 完成后管理后台即在 http://<host>:3001/ 可访问（勾选 HTTPS 并给真实域名
+#      则为 https://<域名>/）。
 #
 # 一次性设置：
 #   - 准备一台全新的 Ubuntu 22.04/24.04 服务器，开通 SSH root 访问。

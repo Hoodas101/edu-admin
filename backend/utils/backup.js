@@ -114,10 +114,16 @@ function listBackups() {
  * 删除指定备份
  */
 function deleteBackup(filename) {
+  // 文件名白名单：仅接受本系统生成的 backup_<时间戳>.db 格式，
+  // 防止 ../ 遍历或与备份目录同前缀的兄弟目录（startsWith 单独判断挡不住）
+  if (typeof filename !== 'string' || !/^backup_[\w-]+\.db$/.test(filename)) throw new Error('非法路径');
   const filepath = path.join(BACKUP_DIR, filename);
-  if (!filepath.startsWith(BACKUP_DIR)) throw new Error('非法路径');
-  if (!fs.existsSync(filepath)) throw new Error('备份文件不存在');
-  fs.unlinkSync(filepath);
+  const resolved = path.resolve(filepath);
+  if (resolved !== path.resolve(BACKUP_DIR, filename) || !resolved.startsWith(path.resolve(BACKUP_DIR) + path.sep)) {
+    throw new Error('非法路径');
+  }
+  if (!fs.existsSync(resolved)) throw new Error('备份文件不存在');
+  fs.unlinkSync(resolved);
   return true;
 }
 

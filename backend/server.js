@@ -48,6 +48,14 @@ const wxpayRoutes = require('./routes/wxpay');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// 反向代理支持：nginx/Caddy 之后 req.ip 恒为 127.0.0.1，会让限流键共享、审计 IP 失真。
+// 通过 TRUST_PROXY 环境变量设置可信跳数（常见 1；多层代理按需调大），仅信任直连跳数、
+// 避免 X-Forwarded-For 伪造。本地直连部署保持默认（不设 = 不信任任何代理头）。
+if (process.env.TRUST_PROXY) {
+  const hops = parseInt(process.env.TRUST_PROXY);
+  app.set('trust proxy', Number.isInteger(hops) && hops > 0 ? hops : true);
+}
+
 // CORS（限制来源）— 必须放在限流与认证之前，确保预检请求带正确响应头
 // 生产环境通过 CORS_ORIGINS 环境变量配置允许的来源（逗号分隔），如：
 //   export CORS_ORIGINS=https://admin.example.com,https://www.example.com
@@ -125,9 +133,9 @@ app.use((req, res, next) => {
   return res.status(401).json({ code: 401, data: null, message: '未登录或登录已过期' });
 });
 
-// 登录接口限流：默认 500 次/15 分钟/IP（可用 LOGIN_RATE_LIMIT 环境变量收紧；生产环境建议调低）
+// 登录接口限流：默认 100 次/15 分钟/IP（可用 LOGIN_RATE_LIMIT 环境变量调整）
 const loginAttempts = new Map();
-const LOGIN_RATE_LIMIT = parseInt(process.env.LOGIN_RATE_LIMIT) || 500;
+const LOGIN_RATE_LIMIT = parseInt(process.env.LOGIN_RATE_LIMIT) || 100;
 const LOGIN_RATE_WINDOW = 15 * 60 * 1000;
 app.use('/api/auth/login', (req, res, next) => {
   const ip = req.ip || req.connection.remoteAddress;

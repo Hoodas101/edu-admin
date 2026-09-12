@@ -77,8 +77,9 @@ router.post('/login', (req, res) => {
       }
     }
 
-    // 优先使用微信返回的 openid，否则使用手机号生成唯一标识
-    let openid = req.body.openid || (phone ? `phone_${phone}` : generateId('wx_'));
+    // openid 一律由服务端派生，绝不接受客户端自报：
+    // 旧版信任 body.openid，任何人构造 phone_<手机号> 或已知 wx 标识即可免凭证命中他人账号（鉴权绕过）
+    let openid = phone ? `phone_${phone}` : generateId('wx_');
 
     // 查找或创建用户
     let user = db.prepare('SELECT * FROM users WHERE openid = ?').get(openid);
@@ -90,13 +91,14 @@ router.post('/login', (req, res) => {
     }
 
     if (!user) {
-      // 凭证登录：手机号未匹配到账号，说明未开通
+      // 凭证登录：统一返回"手机号或密码错误"，不区分"账号不存在/未设密码/密码错误"，
+      // 否则攻击者可用错误文案差异枚举哪些员工手机号已开通（账号存在性 oracle）
       if (isCredential) {
-        return res.status(403).json(safeFail('该手机号未开通登录权限，请联系机构在后台配置后登录'));
+        return res.status(403).json(safeFail('手机号或密码错误'));
       }
       // 无密码路径：仅家长可自助注册
       if (requestedRole !== 'parent') {
-        return res.status(403).json(safeFail(`该手机号未开通${roleLabel}身份，请联系机构在后台配置后登录`));
+        return res.status(403).json(safeFail('手机号或密码错误'));
       }
       // 家长：手机号即注册（保持原有能力）
       const userId = generateId('user_');
@@ -118,11 +120,12 @@ router.post('/login', (req, res) => {
       // 凭证登录：角色由服务端权威判定，不校验客户端声明的角色是否匹配
       if (isCredential) {
         if (!user.password) {
-          return res.status(403).json(safeFail('该账号未设置密码，请使用微信一键登录'));
+          // 与"密码错误"同文案：不向攻击者泄露该账号是否设置过密码
+          return res.status(403).json(safeFail('手机号或密码错误'));
         }
         const pwdResult = verifyPassword(password, user.password);
         if (!pwdResult.valid) {
-          return res.status(403).json(safeFail('密码错误，请重新输入'));
+          return res.status(403).json(safeFail('手机号或密码错误'));
         }
         // 旧版 SHA-256 哈希自动升级为 bcrypt
         if (pwdResult.needsUpgrade) {

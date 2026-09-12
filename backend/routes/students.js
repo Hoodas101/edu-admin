@@ -12,7 +12,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, JWT_SECRET: QR_SECRET } = require('../utils');
 
 // 兼容迁移：会员编号 + 归档标记（退费/流失可归档隐藏，不删除）
 try { db.prepare("ALTER TABLE students ADD COLUMN member_no TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
@@ -733,7 +733,7 @@ router.post('/:id/qrcode', requireAuth, (req, res) => {
     }
 
     // 生成签到二维码内容：随机 nonce + 60s 时效，避免离线伪造与重放
-    const QR_SECRET = process.env.JWT_SECRET || 'change-this-jwt-secret-before-deploy';
+    // QR_SECRET 复用服务端 JWT 密钥（未配置时已自动随机生成，不再是硬编码公开值）
     const nonce = crypto.randomBytes(12).toString('hex');
     const exp = Date.now() + 60 * 1000;
     const qrHash = crypto.createHash('sha256').update(`${id}:${nonce}:${exp}:${QR_SECRET}`).digest('hex').slice(0, 16);

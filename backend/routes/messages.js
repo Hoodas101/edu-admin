@@ -304,13 +304,26 @@ router.post('/read-all', (req, res) => {
 router.get('/group-notice', (req, res) => {
   try {
     const { group } = req.query;
+    const openid = getOpenId(req);
     let row = null;
     if (group) {
+      // 可见性与 list 对齐：家长只能看全局广播 + 自己孩子所报班级定向的广播；员工看全部
+      const params = [group];
+      let visClause = '';
+      if (!isAdminReq(req)) {
+        visClause = `AND (group_name = '' OR EXISTS (
+            SELECT 1 FROM enrollments e
+            JOIN schedules s ON s.id = e.schedule_id
+            WHERE e.student_id IN (SELECT student_id FROM parent_bindings pb WHERE pb.parent_openid = ?)
+              AND s.course_name = notifications.group_name
+          ))`;
+        params.push(openid);
+      }
       row = db.prepare(`
         SELECT * FROM notifications
-        WHERE is_broadcast = 1 AND (group_name = ? OR group_name = '')
+        WHERE is_broadcast = 1 AND (group_name = ? OR group_name = '') ${visClause}
         ORDER BY created_at DESC LIMIT 1
-      `).get(group);
+      `).get(...params);
     } else {
       row = db.prepare(`
         SELECT * FROM notifications
