@@ -16,7 +16,8 @@
  * - 系统设置
  * - 家长-成员绑定（含 parent_openid）
  *
- * 运行方式：npm run seed  或  node db/seed.js
+ * 运行方式：node db/seed.js —— 仅空库可灌；库中已有账号时拒绝执行（防误清生产数据），
+ * 确需重置为演示数据：node db/seed.js --force  或  npm run seed:force
  */
 const db = require('./index');
 

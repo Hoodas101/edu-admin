@@ -20,10 +20,20 @@ process.env.NODE_ENV = 'test';
 const SRC_DB = path.join(__dirname, '..', 'db', 'data.db');
 const TEST_DB_DIR = '/tmp/edu-test-p2';
 process.env.DB_PATH = path.join(TEST_DB_DIR, 'data.db');
+// 双模式（同 full-system）：本地有快照则复制快照；CI 空库则自举 seed 夹具。
+// 旧版只复制快照，CI 空库下身份解析不到 → 403 + 外键崩溃（对抗审查实测复现）。
 fs.mkdirSync(TEST_DB_DIR, { recursive: true });
-for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
-  const src = path.join(__dirname, '..', 'db', f);
-  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(TEST_DB_DIR, f));
+const SNAPSHOT = fs.existsSync(SRC_DB) && process.env.P2_FORCE_FIXTURE !== '1';
+if (SNAPSHOT) {
+  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
+    const src = path.join(__dirname, '..', 'db', f);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(TEST_DB_DIR, f));
+  }
+} else {
+  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
+    try { fs.unlinkSync(path.join(TEST_DB_DIR, f)); } catch (e) { /* 不存在则忽略 */ }
+  }
+  require('../db/seed')();
 }
 
 const BASE = `http://localhost:${process.env.PORT}`;
@@ -66,6 +76,16 @@ async function main() {
 
   // token_version 吊销校验：自签 Token 需携带与库中一致的 tv（服务器启动时已跑迁移 012）
   const db = new Database(process.env.DB_PATH);
+  // 夹具库（CI 自举 seed）身份为 wx_ 前缀且 schedules.teacher_id 外键指向 teachers：
+  // 无快照时按角色动态解析 openid，并把 coach 覆盖为有排课资格的 teacher_id
+  if (!SNAPSHOT) {
+    for (const role of ['admin', 'coach', 'sales']) {
+      const row = db.prepare("SELECT openid FROM users WHERE role = ? AND status = 'active' ORDER BY created_at LIMIT 1").get(role);
+      if (row) IDS[role] = row.openid;
+    }
+  }
+  // schedules.teacher_id 外键指向 teachers.id：夹具库没有 phone_* 教师行，改用 seed 的教练教师
+  const coachTeacherId = SNAPSHOT ? IDS.coach : ((db.prepare("SELECT id FROM teachers WHERE status = 'active' ORDER BY id LIMIT 1").get() || {}).id || 'teacher_001');
   const tvOf = (openid) => (db.prepare('SELECT token_version FROM users WHERE openid = ?').get(openid) || {}).token_version || 0;
   const tokens = {
     admin: generateToken({ openid: IDS.admin, role: 'admin', tv: tvOf(IDS.admin) }),
@@ -166,7 +186,7 @@ async function main() {
     const future = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
     db.prepare(`INSERT INTO schedules (id, course_id, course_name, teacher_id, date, start_time, end_time, status, max_students, created_at, updated_at)
       VALUES (?, ?, '测试课', ?, ?, '09:00', '10:00', 'scheduled', 10, ?, ?)`)
-      .run(schId, courseId, IDS.coach, future, t(), t());
+      .run(schId, courseId, coachTeacherId, future, t(), t());
 
     // 模拟 auto-absent：先写入 absent 考勤
     const attId = gen('att_p2_');
@@ -203,7 +223,7 @@ async function main() {
     const schId2 = gen('sch_p2b_');
     db.prepare(`INSERT INTO schedules (id, course_id, course_name, teacher_id, date, start_time, end_time, status, max_students, created_at, updated_at)
       VALUES (?, ?, '测试课2', ?, ?, '09:00', '10:00', 'scheduled', 10, ?, ?)`)
-      .run(schId2, courseId, IDS.coach, future, t(), t());
+      .run(schId2, courseId, coachTeacherId, future, t(), t());
     db.prepare(`INSERT INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name, status, checkin_method, date, created_at, updated_at)
       VALUES (?, ?, ?, '学员', ?, '测试课2', 'present', 'teacher', ?, ?, ?)`)
       .run(gen('att_p2b_'), schId2, studentId, courseId, future, t(), t());

@@ -86,4 +86,4 @@ jobs:
         run: |
           PROTO="http"
           if [ "${{ inputs.use_https }}" = "true" ]; then PROTO="https"; fi
-          echo "::notice title=部署完成::星课 StarClass 已上线 $PROTO://${{ inputs.server_host }}/ —— 管理员 13800000001 / 123456（登录后请改密）"
+          echo "::notice title=部署完成::星课 StarClass 已上线 $PROTO://${{ inputs.server_host }}/ —— 若本次为全新空库部署且开启了示例数据，管理员为 13800000001 / 123456；存量库沿用原有账号（登录后请改密）"

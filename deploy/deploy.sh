@@ -100,7 +100,9 @@ fi
 # ---- 数据库引导 -------------------------------------------------------------------
 if [[ "$FRESH_DB" -eq 1 ]]; then
   echo "[db] 重置数据库（--fresh-db）"
-  docker compose exec -T app rm -f /data/data.db
+  # 必须连 WAL/SHM 一起删：只删主库时 -wal 里的旧数据会在 SQLite 恢复时回灌，
+  # 导致下方 users 探测误判"已有数据"而跳过 seed —— 用户要 fresh 却拿到旧库
+  docker compose exec -T app rm -f /data/data.db /data/data.db-wal /data/data.db-shm
 fi
 docker compose exec -T app node db/init.js
 # 安全守卫：只有空库才灌示例数据。重跑部署绝不覆盖已有生产数据。

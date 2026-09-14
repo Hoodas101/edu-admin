@@ -147,9 +147,10 @@ const handleLogin = async () => {
         return
       }
       ElMessage.success('登录成功')
-      // 401 掉线重登后回原页面；否则管理员/销售进看板，教练进排期
+      // 401 掉线重登后回原页面；否则管理员/销售进看板，教练进排期。
+      // 排除回跳登录页自身（旧书签 /login?redirect=/login），否则 push 被路由去重吞掉、停在登录页像登录失败
       const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
-      if (redirect && redirect.startsWith('/') && !redirect.startsWith('//')) {
+      if (redirect && redirect.startsWith('/') && !redirect.startsWith('//') && !redirect.startsWith('/login')) {
         router.push(redirect)
       } else if (data.role === 'coach') {
         router.push('/schedule')

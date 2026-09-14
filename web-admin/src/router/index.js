@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { hasPageAccess, permsFromStorage } from '@/utils/access'
 
 // 路由配置
@@ -98,7 +99,8 @@ router.beforeEach((to, from, next) => {
     if (hasPageAccess(role, permsFromStorage(), to.meta)) {
       next()
     } else {
-      // 无权限：回各自默认页
+      // 无权限：回各自默认页。带明确提示，避免掉线重登跳到无权限页时被"静默弹回"误认为页面坏了
+      ElMessage.warning(`没有访问「${to.meta.title || '该页面'}」的权限，已返回主页`)
       next(role === 'coach' ? '/schedule' : '/dashboard')
     }
   } else {

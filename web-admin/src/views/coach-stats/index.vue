@@ -73,7 +73,14 @@
         <div v-if="settlement.length" class="settlement-total">
           本月应发合计：
           <span class="fee-amount total">¥{{ totalAmount.toLocaleString() }}</span>
-          <span class="settlement-note">按各{{ $t('instructor') }}薪资规则计算（按课时 / 按人头 / 混合），人数按实际签到计算{{ monthSettled ? ' · 本月已结算入账，净利润已扣减课酬' : ' · 点击「确认结算」后课酬才计入财务净利润' }}</span>
+          <span class="settlement-note">按各{{ $t('instructor') }}薪资规则计算（按课时 / 按人头 / 混合），人数按实际签到计算</span>
+        </div>
+        <!-- 未结算提示是老板最容易漏看的财务口径警示，单独成行并用 warning 色强调 -->
+        <div v-if="settlement.length && !monthSettled" class="settlement-unsettled-tip">
+          ⚠ 本月尚未结算：点击「确认结算」后，课酬才计入财务报表净利润（当前净利润为虚高值）。
+        </div>
+        <div v-else-if="settlement.length && monthSettled" class="settlement-note">
+          本月已结算入账，净利润已扣减课酬。
         </div>
       </div>
 
@@ -82,7 +89,7 @@
       <div class="card table-container">
         <el-table :data="payrollLogs" v-loading="loadingLogs" empty-text="暂无结算记录，点击「确认结算」生成本月结算" size="small">
           <el-table-column label="月份" min-width="90">
-            <template #default="{ row }">{{ row.month }}</template>
+            <template #default="{ row }">{{ monthLabelOf(row.month) }}</template>
           </el-table-column>
           <el-table-column :label="$t('instructor')" min-width="100">
             <template #default="{ row }">
@@ -103,7 +110,8 @@
             </template>
           </el-table-column>
           <el-table-column label="结算时间" min-width="150">
-            <template #default="{ row }">{{ row.paid_at || row.created_at || '-' }}</template>
+            <!-- 作废记录后端已清空 paid_at：显示「—」而非回落 created_at（避免"已作废却有结算时间"的误导） -->
+            <template #default="{ row }">{{ row.status === 'settled' ? fmtTime(row.paid_at || row.created_at) : '—' }}</template>
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
             <template #default="{ row }">
@@ -112,7 +120,7 @@
             </template>
           </el-table-column>
         </el-table>
-        <div class="settlement-note" style="margin-top: 8px">作废后可对该月重新「确认结算」；历史记录不会自动重算。</div>
+        <div class="settlement-note settlement-footnote">结算是按月整批进行的：作废该月<b>全部</b>结算记录后，方可重新「确认结算」；历史记录不会自动重算。</div>
       </div>
 
       <!-- 各周期概览 -->
@@ -305,6 +313,12 @@ const month = ref(dayjs().format('YYYY-MM'))
 const exportDialogRef = ref(null)
 const exportAction = ref('detail')
 const monthLabel = computed(() => month.value.replace('-', '年') + '月')
+const monthLabelOf = (m) => (m ? String(m).replace('-', '年') + '月' : '—')
+const fmtTime = (v) => {
+  if (!v) return '—'
+  const d = dayjs(Number(v) || v)
+  return d.isValid() ? d.format('YYYY-MM-DD HH:mm') : String(v)
+}
 const rows = ref([])
 const settlement = ref([])
 const selfPeriods = ref([])
@@ -420,9 +434,12 @@ const settleNow = async () => {
 }
 
 const voidLog = async (row) => {
+  // 结算是整月批量：作废单行后该月若还剩其它 settled 记录，「确认结算」仍被锁定——提前讲清，避免老板逐条找不到按钮
+  const others = payrollLogs.value.filter((r) => r.month === row.month && r.status === 'settled' && r.id !== row.id).length
+  const extra = others > 0 ? `\n该月另有 ${others} 位${t('instructor')}的结算记录，需全部作废后才能重新「确认结算」。` : '\n作废后可对该月重新「确认结算」。'
   try {
     await ElMessageBox.confirm(
-      `作废「${row.teacher_name}」${row.month} 的结算记录（¥${Number(row.amount || 0).toLocaleString()}）？作废后净利润不再扣减该笔课酬，可重新结算。`,
+      `作废「${row.teacher_name}」${monthLabelOf(row.month)} 的结算记录（¥${Number(row.amount || 0).toLocaleString()}）？作废后净利润不再扣减该笔课酬。${extra}`,
       '确认作废',
       { type: 'warning', confirmButtonText: '作废', cancelButtonText: '取消' }
     )
@@ -612,6 +629,16 @@ onMounted(() => {
   color: var(--t-text-1);
 }
 .settlement-note { font-size: var(--t-fs-xs); font-weight: 400; color: var(--t-text-3); }
+.settlement-footnote { margin-top: var(--t-spacing-sm, 8px); }
+.settlement-unsettled-tip {
+  margin-top: var(--t-spacing-sm, 8px);
+  font-size: var(--t-fs-sm);
+  color: var(--t-warning-text);
+  background: color-mix(in srgb, var(--t-warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--t-warning) 28%, transparent);
+  border-radius: var(--t-radius-sm, 6px);
+  padding: 6px 10px;
+}
 .attended-num { font-weight: 700; color: var(--t-text-1); }
 
 .drawer-head {

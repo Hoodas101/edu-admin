@@ -68,6 +68,17 @@
 - 薪资：新增 `POST /api/payroll/settle` 按月结算写入 `payroll_logs`
   （财务净利润不再把课酬当 0 虚高），配套 /logs /void 与前端「确认结算 / 结算记录 / 作废」；
   结算确认弹窗人数改按「金额 > 0 的教练」计（与后端跳过 0 元记录的口径一致，不再虚报）
+- 薪资结算流程可懂性：作废弹窗提示「该月剩余 N 条需全部作废方可重算」；月份列与页内
+  其它区域统一「2026年09月」格式；已作废记录结算时间显示「—」不再回落创建时间；
+  「净利润虚高」警示从灰色小字升级为独立 warning 提示条
+- 登录/掉线边角：`/login?redirect=/login` 不再停在登录页；并发 401 只提示跳转一次；
+  重登跳到无权限页时给出明确 toast（不再静默弹回让人以为页面坏了）
+- CI 阻断修复：`p2-fixes` 套件补 seed 夹具自举双模式（旧版 CI 空库下身份解析不到，
+  403 + 外键崩溃三矩阵全红，对抗审查在干净 worktree 实测复现）
+- 部署加固：`--fresh-db` 连 `-wal/-shm` 一起删（防旧数据经 WAL 回灌致守卫误判跳过 seed）；
+  `remote-deploy.sh` 的 .env 备份改 mktemp 随机路径 + 0600 权限 + trap 兜底恢复；
+  Deploy 工作流完成通知不再无条件展示示例账号（存量库沿用原账号）；
+  `seed.js` 头注释与守卫行为对账；CHANGELOG「移除」段改写为如实描述（本地清理非仓库删除）
 
 ### 变更 Changed
 
@@ -81,9 +92,10 @@
 
 ### 移除 Removed
 
-- 旧代脚本 `start.sh` / `stop.sh`（由 `start-all.sh` / `stop-all.sh` 取代）、
-  CloudBase 遗物 `seed-data.js` / `init-cloud.js` / `deploy-functions.sh`
-- 根目录散落的 10 份 AUDIT/QA 历史报告移入 `docs/archive/`（本就不入库）
+- 本地工作区清理（下列文件本就未被 git 跟踪，仓库无对应删除记录）：
+  旧代脚本 `start.sh` / `stop.sh`（由 `start-all.sh` / `stop-all.sh` 取代）、
+  CloudBase 遗物 `seed-data.js` / `init-cloud.js` / `deploy-functions.sh` 从开发机移除；
+  根目录散落的 10 份 AUDIT/QA 历史报告移入 `docs/archive/`（`.gitignore` 覆盖）
 
 
 <!--
