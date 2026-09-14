@@ -1,13 +1,10 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
-import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
-import 'element-plus/dist/index.css'
-// 暗色组件库变量（挂到 html.dark 下生效）
+// Element Plus 按需引入：组件/指令/API 由 vite 的 unplugin 解析器自动注册并注入样式，
+// 这里仅保留两件事——暗色变量表与基础图标字体（无 JS 注册，避免全量打包 1MB+）。
 import 'element-plus/theme-chalk/dark/css-vars.css'
-import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 
-// 全局样式（必须在 Element Plus 之后引入以覆盖默认样式）
+// 全局样式（含 .el-* 覆写，依赖组件样式已按页面注入，靠 CSS 变量生效与加载顺序无关）
 import '@/styles/index.scss'
 
 import App from './App.vue'
@@ -20,13 +17,6 @@ initTheme()
 
 const app = createApp(App)
 
-// 注册所有 Element Plus 图标
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component)
-}
-
-// 注册 Element Plus（中文 locale）
-app.use(ElementPlus, { locale: zhCn })
 // 注册路由
 app.use(router)
 // 注册 Pinia

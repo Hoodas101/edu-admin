@@ -620,8 +620,7 @@
 
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled } from '@element-plus/icons-vue'
+import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled, Refresh } from '@element-plus/icons-vue'
 import request from '@/api/request'
 import { getSettings, saveSettings, changePassword, generateRenewalNotices, getDataModules, exportData, importData } from '@/api/modules'
 import { useSettingsStore } from '@/store/settings'

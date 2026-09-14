@@ -223,9 +223,8 @@ import {
 import { CanvasRenderer } from 'echarts/renderers'
 echarts.use([LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, TitleComponent, CanvasRenderer])
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { UserFilled } from '@element-plus/icons-vue'
+import { UserFilled, CaretTop, CaretBottom } from '@element-plus/icons-vue'
 import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollowUpsToday, completeFollowUp } from '@/api/modules'
 import { relativeTime } from '@/utils/format'
 import StatusDot from '@/components/StatusDot.vue'

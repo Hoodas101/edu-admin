@@ -385,7 +385,6 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, reactive, computed, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { Plus, Download, Printer, Upload } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'

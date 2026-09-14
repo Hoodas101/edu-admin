@@ -17,6 +17,13 @@
           @change="load"
         />
         <template v-if="isAdmin">
+          <el-button
+            type="success"
+            :icon="Money"
+            :loading="settling"
+            :disabled="monthSettled"
+            @click="settleNow"
+          >{{ monthSettled ? '本月已结算' : '确认结算' }}</el-button>
           <el-button :icon="Download" @click="openExport('detail')">导出课时明细</el-button>
           <el-button type="primary" :icon="Download" @click="openExport('settlement')">导出薪资结算</el-button>
         </template>
@@ -66,8 +73,46 @@
         <div v-if="settlement.length" class="settlement-total">
           本月应发合计：
           <span class="fee-amount total">¥{{ totalAmount.toLocaleString() }}</span>
-          <span class="settlement-note">按各{{ $t('instructor') }}薪资规则计算（按课时 / 按人头 / 混合），人数按实际签到计算</span>
+          <span class="settlement-note">按各{{ $t('instructor') }}薪资规则计算（按课时 / 按人头 / 混合），人数按实际签到计算{{ monthSettled ? ' · 本月已结算入账，净利润已扣减课酬' : ' · 点击「确认结算」后课酬才计入财务净利润' }}</span>
         </div>
+      </div>
+
+      <!-- 结算记录 -->
+      <div class="section-title">结算记录</div>
+      <div class="card table-container">
+        <el-table :data="payrollLogs" v-loading="loadingLogs" empty-text="暂无结算记录，点击「确认结算」生成本月结算" size="small">
+          <el-table-column label="月份" min-width="90">
+            <template #default="{ row }">{{ row.month }}</template>
+          </el-table-column>
+          <el-table-column :label="$t('instructor')" min-width="100">
+            <template #default="{ row }">
+              <span class="coach-name">{{ row.teacher_name }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="课次" min-width="80" align="right">
+            <template #default="{ row }">{{ row.lesson_count }} 节</template>
+          </el-table-column>
+          <el-table-column label="结算金额" min-width="120" align="right">
+            <template #default="{ row }">
+              <span class="fee-amount">¥{{ Number(row.amount || 0).toLocaleString() }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" min-width="90">
+            <template #default="{ row }">
+              <StatusDot :tone="row.status === 'settled' ? 'success' : 'neutral'" :label="row.status === 'settled' ? '已结算' : '已作废'" subtle />
+            </template>
+          </el-table-column>
+          <el-table-column label="结算时间" min-width="150">
+            <template #default="{ row }">{{ row.paid_at || row.created_at || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ row }">
+              <el-button v-if="row.status === 'settled'" link type="danger" @click="voidLog(row)">作废</el-button>
+              <span v-else class="settlement-note">—</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="settlement-note" style="margin-top: 8px">作废后可对该月重新「确认结算」；历史记录不会自动重算。</div>
       </div>
 
       <!-- 各周期概览 -->
@@ -227,8 +272,7 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Download, ArrowRight } from '@element-plus/icons-vue'
+import { Download, ArrowRight, Money } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
@@ -241,6 +285,9 @@ import {
   getPayrollCoachDetail,
   updatePayrollRule,
   getMyPayroll,
+  settlePayroll,
+  getPayrollLogs,
+  voidPayrollLog,
 } from '@/api/modules'
 import { exportXlsx } from '@/utils/xlsx'
 import ExportDialog from '@/components/ExportDialog.vue'
@@ -323,6 +370,64 @@ const load = async () => {
   } finally {
     loading.value = false
   }
+}
+
+// ============ 按月结算（写入 payroll_logs，净利润随之扣减课酬） ============
+const settling = ref(false)
+const loadingLogs = ref(false)
+const payrollLogs = ref([])
+const monthSettled = computed(() =>
+  payrollLogs.value.some((r) => r.month === month.value && r.status === 'settled')
+)
+
+const loadLogs = async () => {
+  if (!isAdmin.value) return
+  loadingLogs.value = true
+  try {
+    const res = await getPayrollLogs()
+    payrollLogs.value = res.list || []
+  } catch (e) {
+    payrollLogs.value = []
+  } finally {
+    loadingLogs.value = false
+  }
+}
+
+const settleNow = async () => {
+  try {
+    await ElMessageBox.confirm(
+      `确认结算 ${monthLabel.value} 全部${t('instructor')}课时费（${settlement.value.length} 位 · 合计 ¥${totalAmount.value.toLocaleString()}）？结算后课酬将计入财务报表净利润，如需重算需先作废本月结算记录。`,
+      '确认薪资结算',
+      { type: 'warning', confirmButtonText: '确认结算', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return // 用户取消
+  }
+  settling.value = true
+  try {
+    const res = await settlePayroll(month.value)
+    ElMessage.success(`已结算 ${res.settled} 位 · ¥${Number(res.totalAmount || 0).toLocaleString()}`)
+    await loadLogs()
+  } catch (e) { /* 拦截器已提示（如"该月已结算"） */ } finally {
+    settling.value = false
+  }
+}
+
+const voidLog = async (row) => {
+  try {
+    await ElMessageBox.confirm(
+      `作废「${row.teacher_name}」${row.month} 的结算记录（¥${Number(row.amount || 0).toLocaleString()}）？作废后净利润不再扣减该笔课酬，可重新结算。`,
+      '确认作废',
+      { type: 'warning', confirmButtonText: '作废', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  try {
+    await voidPayrollLog(row.id)
+    ElMessage.success('已作废')
+    await loadLogs()
+  } catch (e) { /* 拦截器已提示 */ }
 }
 
 // ============ 薪资规则配置 ============
@@ -464,7 +569,10 @@ const doExportOne = async (range) => {
   } catch (e) { /* 拦截器已提示 */ }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadLogs()
+})
 </script>
 
 <style lang="scss" scoped>

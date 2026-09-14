@@ -195,7 +195,6 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { getMakeupEligible, assignMakeup, cancelMakeup, getMakeupRecords, getSchedules, getScheduleDetail, rescheduleStudent } from '@/api/modules'
 
 defineProps({ embedded: Boolean })

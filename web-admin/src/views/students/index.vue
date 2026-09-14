@@ -535,7 +535,6 @@ const props = defineProps({
 })
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, UserFilled, School, CreditCard, Download, Upload, Finished, CaretBottom, Setting } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { getStudents, getStudentDetail, addStudent, updateStudent, deleteStudent, pauseCard, resumeCard, getCardTypes, getSettings, saveSettings, getDashboard, getStudentTimeline, importStudents, getComments, addComment } from '@/api/modules'

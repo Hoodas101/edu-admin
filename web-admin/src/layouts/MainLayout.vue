@@ -221,7 +221,6 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
-import { ElMessageBox, ElMessage } from 'element-plus'
 import EntityAvatar from '@/components/EntityAvatar.vue'
 import { themeMode, cycleThemeMode, THEME_LABELS } from '@/utils/theme'
 import {
@@ -245,7 +244,8 @@ import {
   ShoppingBag,
   TrendCharts,
   Star,
-  Avatar
+  Avatar,
+  CaretBottom
 } from '@element-plus/icons-vue'
 
 const iconMap = {
@@ -271,11 +271,13 @@ import {
   getSettings,
 } from '@/api/modules'
 import { getStudents, getLeads } from '@/api/modules'
+import { usePageAccess } from '@/utils/access'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const settingsStore = useSettingsStore()
+const { can: canAccess } = usePageAccess()
 const t = settingsStore.t
 
 // 将菜单标题中的 {concept} 占位符解析为当前称呼方案下的词（如 {learner} → 学员/会员）
@@ -461,13 +463,13 @@ const activeMenu = computed(() => route.path)
 // 当前页面标题
 const currentTitle = computed(() => resolveTitle(route.meta.title) || '')
 
-// 菜单路由（排除重定向和登录页）
+// 菜单路由（排除重定向和登录页）：与路由守卫共用 usePageAccess 判定，
+// 保证"守卫放行的页面一定有菜单入口"（此前菜单只看 meta.roles，
+// 被自定义授权 sales/students 的 coach 能进页面却找不到入口）
 const menuRoutes = computed(() => {
   const rootRoute = router.options.routes.find((r) => r.path === '/')
-  // 不回退 'admin'：与 user store 一致，缺角色按最低权限（不显示任何受限菜单）
-  const role = userStore.userRole
   return (rootRoute?.children || []).filter(
-    (r) => r.meta && r.meta.title && (!r.meta.roles || r.meta.roles.includes(role))
+    (r) => r.meta && r.meta.title && canAccess(r.meta)
   ) || []
 })
 

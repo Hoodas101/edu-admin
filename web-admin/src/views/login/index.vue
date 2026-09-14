@@ -95,7 +95,6 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { School, Iphone, UserFilled, Basketball, Setting, Lock } from '@element-plus/icons-vue'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
@@ -148,8 +147,11 @@ const handleLogin = async () => {
         return
       }
       ElMessage.success('登录成功')
-      // 管理员/销售默认进看板，教练默认进排期
-      if (data.role === 'coach') {
+      // 401 掉线重登后回原页面；否则管理员/销售进看板，教练进排期
+      const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
+      if (redirect && redirect.startsWith('/') && !redirect.startsWith('//')) {
+        router.push(redirect)
+      } else if (data.role === 'coach') {
         router.push('/schedule')
       } else {
         router.push('/dashboard')

@@ -172,7 +172,6 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, reactive, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
 import { Search, Download } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { getPointsSummary, getPointsList, getPointsLogs, adjustPoints } from '@/api/modules'

@@ -157,7 +157,6 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Download } from '@element-plus/icons-vue'
 import { getNoticeAdminList, publishNotice, deleteNotice, getCourses } from '@/api/modules'
 import dayjs from 'dayjs'

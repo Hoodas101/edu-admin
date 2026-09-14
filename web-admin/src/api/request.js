@@ -3,7 +3,6 @@
 // API 格式：/api/{resource}/{action}，返回 { code: 0, data, message }
 
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
 import router from '@/router'
 
 // 后端 API 根地址（与 vite.config.js proxy 保持一致，默认相对路径避免 CORS）
@@ -61,7 +60,15 @@ service.interceptors.response.use(
           // 与主动登出对齐：同时清除身份缓存，避免共享电脑残留上一位用户的手机号与权限清单
           localStorage.removeItem('edu_token')
           localStorage.removeItem('edu_user_info')
-          router.push('/login')
+          localStorage.removeItem('edu_settings')
+          // 携带 redirect：重新登录后回到掉线前的页面，而不是每次都回看板
+          {
+            const cur = router.currentRoute?.value
+            const target = cur && cur.fullPath && !cur.meta?.public
+              ? `/login?redirect=${encodeURIComponent(cur.fullPath)}`
+              : '/login'
+            if (cur?.path !== '/login') router.push(target)
+          }
           return Promise.reject(new Error(response.data?.message || '登录已过期，请重新登录'))
         case 403:
           ElMessage.error(response.data?.message || '没有权限访问')
