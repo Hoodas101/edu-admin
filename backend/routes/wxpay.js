@@ -44,6 +44,18 @@ router.post('/create', async (req, res) => {
     if (!order) return res.json(fail('订单不存在'));
     if (order.status === 'paid') return res.json(fail('订单已支付'));
 
+    // 归属校验：仅订单所有者（下单家长）或绑定学员的家长可发起支付，
+    // 否则任何人可对他人订单发起支付并覆盖 payments 记录。
+    // 管理员经 Web 后台走「标记已收款」，微信侧支付入口仅对家长/订单主开放。
+    const isOwner = openid && (
+      (order.user_id && order.user_id === openid) ||
+      !!db.prepare('SELECT 1 FROM parent_bindings WHERE parent_openid = ? AND student_id = ?')
+        .get(openid, order.student_id || '')
+    );
+    if (!isOwner) {
+      return res.status(403).json(safeFail('无权支付他人订单'));
+    }
+
     // 获取支付者 openid（微信登录的 openid）
     const user = db.prepare('SELECT openid FROM users WHERE openid = ?').get(openid);
     const wxOpenid = String(openid).startsWith('wx_') ? openid.substring(3) : openid;
@@ -55,14 +67,15 @@ router.post('/create', async (req, res) => {
       openid: wxOpenid,
     });
 
-    if (result.success) {
-      // 记录支付请求
+    if (result.success && result.paySign) {
+      // 记录支付请求（同订单仅保留一条 pending：先清理旧的待支付流水，避免 OR REPLACE 覆盖成功流水）
       db.prepare(`
-        INSERT OR REPLACE INTO payments (id, order_id, order_no, user_id, amount, channel, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'wechat', 'pending', ?)
+        INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, status, created_at)
+        SELECT ?, ?, ?, ?, ?, 'wechat', 'pending', ?
+        WHERE NOT EXISTS (SELECT 1 FROM payments WHERE order_id = ? AND status = 'pending')
       `).run(
-        `pay_${order.order_no}`, order.id, order.order_no,
-        openid, order.payable_amount, now()
+        `pay_${order.order_no}_${Date.now()}`, order.id, order.order_no,
+        openid, order.payable_amount, now(), order.id
       );
       res.json(success({ paySign: result.paySign, orderId: order.id }));
     } else {

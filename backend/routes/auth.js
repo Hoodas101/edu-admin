@@ -12,11 +12,16 @@ const { generateId, generateToken, success, fail, safeFail, getOpenId, escapeLik
 let _wxAccessToken = '';
 let _wxAccessTokenExpire = 0;
 
-// 兼容迁移：对外展示别名（活动中显示别名，不暴露真实姓名）
-try { db.prepare("ALTER TABLE users ADD COLUMN alias TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE teachers ADD COLUMN alias TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-// 兼容迁移：员工自定义权限（JSON 数组，空则按角色默认）
-try { db.prepare("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
+// alias / permissions 列已收编至 migrations/011
+
+// 家长「手机号免密登录/自助注册」开关：
+// - 显式设置 PARENT_PHONE_LOGIN=true/false 时以设置为准；
+// - 未设置时：非生产环境默认开（兼容小程序家长端旧路径与冒烟测试），生产环境默认关，
+//   防止知道手机号即可免凭证登录任意家长账号（账号接管面）。
+// 微信一键登录（带 code）不受此开关影响，仍走 openid 路径。
+const PARENT_PHONE_LOGIN = process.env.PARENT_PHONE_LOGIN
+  ? process.env.PARENT_PHONE_LOGIN === 'true'
+  : process.env.NODE_ENV !== 'production';
 
 /**
  * POST /api/auth/upload/avatar — 上传个人头像（base64 → 本地文件）
@@ -100,6 +105,9 @@ router.post('/login', (req, res) => {
       if (requestedRole !== 'parent') {
         return res.status(403).json(safeFail('手机号或密码错误'));
       }
+      if (!PARENT_PHONE_LOGIN) {
+        return res.status(403).json(safeFail('家长免密注册已关闭，请联系管理员开通账号或使用微信登录'));
+      }
       // 家长：手机号即注册（保持原有能力）
       const userId = generateId('user_');
       db.prepare(`
@@ -138,6 +146,9 @@ router.post('/login', (req, res) => {
         // 若不作角色限制：空密码 + 声明与账号相同的角色即可跳过密码校验，
         // 任何人知道管理员/教练手机号都能直接登录其账号（鉴权绕过）。
         return res.status(403).json(safeFail('员工账号请使用密码登录'));
+      } else if (!PARENT_PHONE_LOGIN && phone) {
+        // 生产默认关闭：手机号免密即可登录家长账号，属账号接管面
+        return res.status(403).json(safeFail('家长免密登录已关闭，请输入密码或使用微信登录'));
       }
       // 手机号登录时，仅对历史「手机号身份」账号归一化 openid；
       // 微信身份（wx_ 前缀）保持不变，避免覆盖微信 openid 导致再次微信登录分裂账号
@@ -158,8 +169,8 @@ router.post('/login', (req, res) => {
       `).run(user.openid, phone, user.openid);
     }
 
-    // 生成 JWT Token
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role });
+    // 生成 JWT Token（tv = token_version，用于服务端吊销：停用/改密/降级后旧 Token 失效）
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
 
     res.json(success({
       openid: user.openid,
@@ -240,7 +251,7 @@ router.post('/wx-login', async (req, res) => {
       user.avatar = avatarUrl || user.avatar;
     }
 
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role });
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
     res.json(success({
       openid: user.openid,
       token,
@@ -357,7 +368,7 @@ router.post('/phone-login', async (req, res) => {
       user.avatar = avatarUrl;
     }
 
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role });
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
     res.json(success({
       openid: user.openid,
       token,
@@ -588,7 +599,7 @@ router.post('/updateProfile', (req, res) => {
     res.json(success({
       openid: finalOpenid,
       // openid 可能因手机号变更而改变；重新签发 JWT，避免旧 token 的 openid 失效导致后续请求身份错乱
-      token: generateToken({ openid: finalOpenid, userId: user.id, role: user.role }),
+      token: generateToken({ openid: finalOpenid, userId: user.id, role: user.role, tv: user.token_version || 0 }),
       userId: user.id,
       role: user.role,
       nickname: cleanNickname,
@@ -623,9 +634,15 @@ router.post('/changePassword', (req, res) => {
       return res.status(400).json(safeFail('新密码需为 6-20 位'));
     }
 
-    db.prepare('UPDATE users SET password = ?, updated_at = ? WHERE id = ?')
+    // 改密同时 bump token_version：使该账号其他设备的旧 Token 立即失效；
+    // 并为当前会话签发新 Token 返回，避免自己也被登出。
+    db.prepare('UPDATE users SET password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE id = ?')
       .run(hashPassword(newPassword), now(), user.id);
-    res.json(success({ updated: true }));
+    const freshUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    res.json(success({
+      updated: true,
+      token: generateToken({ openid: freshUser.openid, userId: freshUser.id, role: freshUser.role, tv: freshUser.token_version || 0 }),
+    }));
   } catch (err) {
     console.error('[changePassword]', err);
     res.status(500).json(safeFail('修改密码失败，请稍后重试'));

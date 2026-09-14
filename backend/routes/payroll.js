@@ -5,6 +5,9 @@
  * GET  /api/payroll/coach/:id?month=YYYY-MM — 管理员/本人：某教练逐节薪资明细
  * PUT  /api/payroll/coach/:id/rule          — 管理员：保存教练薪资规则
  * GET  /api/payroll/me?month=YYYY-MM        — 教练本人：我的薪资规则与当月预估
+ * POST /api/payroll/settle                  — 管理员：按月结算，事务写入 payroll_logs（财务净利润据此变真）
+ * GET  /api/payroll/logs?month=YYYY-MM      — 管理员：查询结算记录
+ * POST /api/payroll/logs/:id/void           — 管理员：作废一条结算（状态置 voided）
  */
 const express = require('express');
 const router = express.Router();
@@ -18,10 +21,7 @@ const {
   calcText,
 } = require('../utils/payroll');
 
-// 兼容旧库：确保 teachers 表存在 pay_rule 列
-try {
-  db.prepare("ALTER TABLE teachers ADD COLUMN pay_rule TEXT").run();
-} catch (e) { /* 已存在 */ }
+// teachers.pay_rule 列已收编至 migrations/011
 
 function isAdmin(req) {
   if (req.userRole === 'admin') return true;
@@ -180,6 +180,96 @@ router.put('/coach/:id/rule', (req, res) => {
   } catch (err) {
     console.error('[payroll rule save]', err);
     res.status(500).json(safeFail('保存薪资规则失败'));
+  }
+});
+
+/**
+ * POST /api/payroll/settle — 管理员：按月结算全部教练课时费，事务写入 payroll_logs
+ * Body: { month }  month 格式 YYYY-MM
+ * 结算后财务报表净利润自动扣减课酬支出（finance.js 读取 payroll_logs status='settled'）。
+ * 幂等：同一月份已有 settled 记录时拒绝重复结算，需先逐条作废。
+ */
+router.post('/settle', (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json(safeFail('仅管理员可执行薪资结算'));
+    const month = String(req.body.month || '');
+    const range = monthRange(month);
+    if (!range) return res.json(fail('月份格式应为 YYYY-MM'));
+    const { startDate, endDate } = range;
+
+    const teachers = db.prepare("SELECT * FROM teachers").all();
+    const result = db.transaction(() => {
+      const existing = db.prepare(
+        "SELECT COUNT(*) c FROM payroll_logs WHERE month = ? AND status = 'settled'"
+      ).get(month).c;
+      if (existing > 0) return { err: '该月已结算，如需重算请先作废原结算记录' };
+
+      const ins = db.prepare(`
+        INSERT INTO payroll_logs (id, teacher_id, teacher_name, month, lesson_count, amount, rule_snapshot, status, paid_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'settled', ?, ?)
+      `);
+      let settled = 0;
+      let totalAmount = 0;
+      const t = now();
+      for (const teacher of teachers) {
+        const data = lessonRows(teacher.id, startDate, endDate);
+        if (!data || !data.rows.length) continue;
+        const amount = Math.round(data.totals.amount * 100) / 100;
+        if (amount <= 0) continue;
+        ins.run(
+          generateId('paylog_'), teacher.id, teacher.name, month,
+          data.totals.classes, amount, JSON.stringify(data.rule), t, t
+        );
+        settled += 1;
+        totalAmount += amount;
+      }
+      return { ok: true, settled, totalAmount: Math.round(totalAmount * 100) / 100, month };
+    })();
+
+    if (result.err) return res.json(fail(result.err));
+    res.json(success(result));
+  } catch (err) {
+    console.error('[payroll settle]', err);
+    res.status(500).json(safeFail('薪资结算失败'));
+  }
+});
+
+/**
+ * GET /api/payroll/logs?month=YYYY-MM — 管理员：查询结算记录（month 可选）
+ */
+router.get('/logs', (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json(safeFail('仅管理员可查看薪资结算记录'));
+    const month = req.query.month;
+    let list;
+    if (month) {
+      const range = monthRange(String(month));
+      if (!range) return res.json(fail('月份格式应为 YYYY-MM'));
+      list = db.prepare('SELECT * FROM payroll_logs WHERE month = ? ORDER BY status, teacher_name').all(String(month));
+    } else {
+      list = db.prepare('SELECT * FROM payroll_logs ORDER BY month DESC, status, teacher_name LIMIT 200').all();
+    }
+    res.json(success({ list }));
+  } catch (err) {
+    console.error('[payroll logs]', err);
+    res.status(500).json(safeFail('获取结算记录失败'));
+  }
+});
+
+/**
+ * POST /api/payroll/logs/:id/void — 管理员：作废一条结算记录（不物理删除，保留审计痕迹）
+ */
+router.post('/logs/:id/void', (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json(safeFail('仅管理员可作废结算记录'));
+    const row = db.prepare('SELECT * FROM payroll_logs WHERE id = ?').get(req.params.id);
+    if (!row) return res.json(fail('结算记录不存在'));
+    if (row.status !== 'settled') return res.json(fail('仅已结算记录可作废'));
+    db.prepare("UPDATE payroll_logs SET status = 'voided', paid_at = NULL WHERE id = ?").run(req.params.id);
+    res.json(success({ voided: true, id: req.params.id }));
+  } catch (err) {
+    console.error('[payroll void]', err);
+    res.status(500).json(safeFail('作废结算记录失败'));
   }
 });
 

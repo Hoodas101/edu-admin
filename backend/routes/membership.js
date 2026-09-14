@@ -12,14 +12,8 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt } = require('../utils');
 
-// 轻量迁移：会员卡暂停字段（已存在则忽略）
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN paused_at INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN pause_total_ms INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN pause_reason TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-// 轻量迁移：计费模式（time 时效制 / count 次数制）
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN billing_mode TEXT DEFAULT 'time'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN billing_mode TEXT DEFAULT 'time'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN points_reward INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
+// schema 列（paused_at/billing_mode/points_reward/product_type 等）已收编至 migrations/011；
+// 此处仅保留数据回填。
 // 按卡类型名称回填默认赠送积分（体验10 / 月20 / 季50 / 年120）
 try {
   db.prepare(`
@@ -32,11 +26,6 @@ try {
     WHERE points_reward = 0
   `).run();
 } catch (e) { /* 忽略 */ }
-
-// 轻量迁移：产品类型（membership 上课/训练/会员服务 / goods 其他商品如球衣球鞋）
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN product_type TEXT DEFAULT 'membership'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN unit TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN description TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
 
 // 首次启用商品类型：把原 uniform_price 迁移为一条「训练球服」实物商品（仅当不存在 goods 记录时执行一次）
 try {
@@ -473,9 +462,21 @@ router.post('/refund', (req, res) => {
         if (order) {
           try {
             const items = JSON.parse(order.items || '[]');
-            const it = items.find(i => i.itemId === card.card_type_id) || items[0];
-            if (it && Number(it.price) > 0) paidPrice = Number(it.price);
-            else if (Number(order.payable_amount) > 0) paidPrice = Number(order.payable_amount);
+            // 必须精确匹配本卡商品：旧逻辑回退 items[0] 会把别的热价格算到本卡头上；
+            // 订单明细写入字段是 unitPrice（orders.js），旧逻辑读 it.price 永不命中，
+            // 再回退整单 payable_amount 会对多明细订单超退。
+            const it = items.find(i => i.itemId === card.card_type_id);
+            if (it) {
+              const qty = Number(it.quantity) || 1;
+              const unit = Number(it.unitPrice ?? it.price) || 0;
+              const total = Number(it.totalPrice) || 0;
+              if (unit > 0) paidPrice = unit * qty;
+              else if (total > 0) paidPrice = total;
+            }
+            // 单明细订单可安全回退整单实付
+            if (!paidPrice && items.length === 1 && Number(order.payable_amount) > 0) {
+              paidPrice = Number(order.payable_amount);
+            }
           } catch (e) { /* 忽略损坏数据 */ }
         }
       }

@@ -124,6 +124,20 @@ app.use((req, res, next) => {
     const token = authHeader.slice(7);
     const payload = verifyToken(token);
     if (payload && payload.openid) {
+      // token_version 吊销校验：停用/改密/降级后 bump 计数，旧 Token 立即失效。
+      // 兜底查询失败（库忙等）时放行，不因读库异常把全员踢下线。
+      try {
+        const u = db.prepare('SELECT token_version, status FROM users WHERE openid = ?').get(payload.openid);
+        // 仅对显式非 active 的账号拒绝（历史行可能无 status 值）
+        if (u && u.status && u.status !== 'active') {
+          return res.status(401).json({ code: 401, data: null, message: '账号已停用，请联系管理员' });
+        }
+        if (u && (u.token_version || 0) !== (payload.tv || 0)) {
+          return res.status(401).json({ code: 401, data: null, message: '登录状态已失效，请重新登录' });
+        }
+      } catch (e) {
+        console.error('[auth token_version]', e.message);
+      }
       req.openid = payload.openid;
       req.userRole = payload.role;
       return next();

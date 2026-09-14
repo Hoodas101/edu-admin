@@ -10,12 +10,7 @@ const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq } = require('../utils');
 const { generateRenewalNotifications } = require('../utils/renewal');
 
-// 轻量迁移：通知扩展字段（已存在则忽略）
-try { db.prepare("ALTER TABLE notifications ADD COLUMN priority TEXT DEFAULT 'normal'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE notifications ADD COLUMN summary TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE notifications ADD COLUMN category TEXT DEFAULT 'system'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE notifications ADD COLUMN is_broadcast INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE notifications ADD COLUMN group_name TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
+// priority / summary / category / is_broadcast / group_name 列已收编至 migrations/011
 // 轻量迁移：通知已读记录表（广播通知按用户独立记录）
 try {
   db.exec(`CREATE TABLE IF NOT EXISTS notification_reads (

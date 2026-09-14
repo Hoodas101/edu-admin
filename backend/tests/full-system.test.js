@@ -176,16 +176,20 @@ async function main() {
   if (!up) { console.error('服务器启动失败'); process.exit(2); }
   console.log('服务器已就绪 @', BASE, '（测试库:', process.env.DB_PATH, '）\n');
 
-  const tokens = {
-    admin: generateToken({ openid: IDS.admin, role: 'admin' }),
-    coach: generateToken({ openid: IDS.coach, role: 'coach' }),
-    sales: generateToken({ openid: IDS.sales, role: 'sales' }),
-  };
-
+  // token_version 吊销校验：自签 Token 需携带与库中一致的 tv（服务器启动时已跑迁移 012）
   const Database = require('better-sqlite3');
+  const tvdb = new Database(process.env.DB_PATH);
+  const tvOf = (openid) => (tvdb.prepare('SELECT token_version FROM users WHERE openid = ?').get(openid) || {}).token_version || 0;
+  const tokens = {
+    admin: generateToken({ openid: IDS.admin, role: 'admin', tv: tvOf(IDS.admin) }),
+    coach: generateToken({ openid: IDS.coach, role: 'coach', tv: tvOf(IDS.coach) }),
+    sales: generateToken({ openid: IDS.sales, role: 'sales', tv: tvOf(IDS.sales) }),
+  };
+  tvdb.close();
+
   const tdb = new Database(process.env.DB_PATH, { readonly: true });
   const bound = tdb.prepare(`
-    SELECT pb.parent_openid, pb.student_id, s.name AS stu_name
+    SELECT pb.parent_openid, pb.student_id, s.name AS stu_name, u.token_version AS tv
     FROM parent_bindings pb
     JOIN users u ON u.openid = pb.parent_openid AND u.role = 'parent'
     JOIN students s ON s.id = pb.student_id
@@ -194,7 +198,7 @@ async function main() {
   tdb.close();
   let parentToken = null, parentStudentId = null;
   if (bound) {
-    parentToken = generateToken({ openid: bound.parent_openid, role: 'parent' });
+    parentToken = generateToken({ openid: bound.parent_openid, role: 'parent', tv: bound.tv || 0 });
     parentStudentId = bound.student_id;
     console.log(`家长身份: ${bound.parent_openid} 绑定学员 ${bound.student_id}(${bound.stu_name})\n`);
   } else {

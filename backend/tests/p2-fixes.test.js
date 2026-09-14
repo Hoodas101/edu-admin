@@ -64,13 +64,15 @@ async function main() {
   if (!await waitHealth()) { console.error('服务器启动失败'); process.exit(2); }
   console.log('服务器已就绪 @', BASE, '（测试库:', process.env.DB_PATH, '）\n');
 
+  // token_version 吊销校验：自签 Token 需携带与库中一致的 tv（服务器启动时已跑迁移 012）
+  const db = new Database(process.env.DB_PATH);
+  const tvOf = (openid) => (db.prepare('SELECT token_version FROM users WHERE openid = ?').get(openid) || {}).token_version || 0;
   const tokens = {
-    admin: generateToken({ openid: IDS.admin, role: 'admin' }),
-    coach: generateToken({ openid: IDS.coach, role: 'coach' }),
-    sales: generateToken({ openid: IDS.sales, role: 'sales' }),
+    admin: generateToken({ openid: IDS.admin, role: 'admin', tv: tvOf(IDS.admin) }),
+    coach: generateToken({ openid: IDS.coach, role: 'coach', tv: tvOf(IDS.coach) }),
+    sales: generateToken({ openid: IDS.sales, role: 'sales', tv: tvOf(IDS.sales) }),
   };
 
-  const db = new Database(process.env.DB_PATH);
   const t = () => Date.now();
   const gen = (p) => p + Math.random().toString(36).slice(2, 10);
 
@@ -78,7 +80,7 @@ async function main() {
   const bind = db.prepare('SELECT parent_openid, student_id FROM parent_bindings LIMIT 1').get();
   const studentId = bind ? bind.student_id : 'stu_002';
   const parentOpenid = bind ? bind.parent_openid : null;
-  const parentToken = parentOpenid ? generateToken({ openid: parentOpenid, role: 'parent' }) : null;
+  const parentToken = parentOpenid ? generateToken({ openid: parentOpenid, role: 'parent', tv: tvOf(parentOpenid) }) : null;
 
   // ============================================================
   // P2-9 教师列表明文手机号 / 薪酬规则脱敏

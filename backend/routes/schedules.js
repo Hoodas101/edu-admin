@@ -41,24 +41,9 @@ function notifyEnrolledParents(scheduleId, title, content) {
   }
 }
 
-// 轻量迁移：报名记录增加操作家长留痕（已存在则忽略）
-try { db.prepare("ALTER TABLE enrollments ADD COLUMN created_by TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-
-// 轻量迁移：为周期性排期规则补充重复类型字段（已存在则忽略）
-try { db.prepare("ALTER TABLE schedule_rules ADD COLUMN repeat_type TEXT DEFAULT 'weekly'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE schedule_rules ADD COLUMN interval_days INTEGER DEFAULT 1").run(); } catch (e) { /* 已存在 */ }
-
-// 轻量迁移：排期目标班级/分组（防止跨班报名）
-try { db.prepare("ALTER TABLE schedules ADD COLUMN group_course_id TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE schedules ADD COLUMN group_name TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE schedule_rules ADD COLUMN group_course_id TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE schedule_rules ADD COLUMN group_name TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-
-// 轻量迁移：自定义班级名 / 上课时长 / 学员自助约课 / 指定学员（新增排课页字段）
-try { db.prepare("ALTER TABLE schedules ADD COLUMN class_name TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE schedules ADD COLUMN duration_minutes INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE schedules ADD COLUMN allow_self_booking INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE schedules ADD COLUMN student_ids TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
+// enrollments.created_by / schedule_rules.{repeat_type,interval_days,group_course_id,group_name} /
+// schedules.{group_course_id,group_name,class_name,duration_minutes,allow_self_booking,student_ids}
+// 等散落列已全部收编至 migrations/011（幂等账本），此处不再于 require 时执行 ALTER。
 
 /**
  * 冲突检测函数
@@ -802,7 +787,9 @@ router.get('/:id', (req, res) => {
       students = [];
     }
 
-    res.json(success({ ...s, is_registered: isRegistered, my_enrollments: myEnrollments, students }));
+    // 角色隔离：student_ids 为机构内部指定学员名单，非工作人员不得见（防按 id 枚举读他人名册）
+    const publicSchedule = isStaff ? s : { ...s, student_ids: '' };
+    res.json(success({ ...publicSchedule, is_registered: isRegistered, my_enrollments: myEnrollments, students }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
@@ -819,6 +806,19 @@ router.get('/:id', (req, res) => {
 
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
     if (!existing) return res.json(fail('排期不存在'));
+
+    // 教练归属校验：非管理员只能修改本人授课的排期。
+    // 排期含 price_per_class（直接影响薪资核算），放开任意教练互改等于互改工资。
+    if (!isAdminReq(req)) {
+      const openid = getOpenId(req);
+      let allowed = existing.teacher_id === openid;
+      if (!allowed) {
+        const u = openid ? db.prepare('SELECT phone FROM users WHERE openid = ?').get(openid) : null;
+        const coach = u && u.phone ? db.prepare('SELECT id FROM teachers WHERE phone = ?').get(u.phone) : null;
+        allowed = !!(coach && coach.id === existing.teacher_id);
+      }
+      if (!allowed) return res.status(403).json(safeFail('无权修改非本人授课的排期'));
+    }
 
     // 冲突检测（排除自身）
     const checkTeacherId = teacherId || existing.teacher_id;

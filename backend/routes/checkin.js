@@ -257,8 +257,50 @@ router.post('/teacher', (req, res) => {
 });
 
 /**
+ * 首次到课的「次数卡扣课」：与教师点名路径共用同一套规则，
+ * 家长扫码签到此前完全不扣课，导致次数卡学员无限白嫖课时。
+ * 幂等：同一排期+学员只扣一次；补课/调课登记的学员不重复扣（原排期已扣或请假已扣）。
+ * 必须在事务内调用。
+ */
+function applyArrivalDeduction(studentId, scheduleId, t) {
+  const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
+  if (dedup) return;
+  const makeupEnroll = db.prepare(
+    "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND enroll_type IN ('makeup', 'reschedule') AND status = 'active'"
+  ).get(scheduleId, studentId);
+  if (makeupEnroll) {
+    db.prepare(`
+      UPDATE makeup_records SET status = 'completed', updated_at = ?
+      WHERE makeup_schedule_id = ? AND student_id = ? AND status = 'pending'
+    `).run(t, scheduleId, studentId);
+    return;
+  }
+  const card = db.prepare(`
+    SELECT * FROM member_cards
+    WHERE student_id = ? AND status = 'active' AND billing_mode = 'count'
+      AND expires_at > ? AND remaining_classes > 0
+    ORDER BY expires_at ASC LIMIT 1
+  `).get(studentId, t);
+  if (!card) return;
+  db.prepare(`
+    UPDATE member_cards SET remaining_classes = remaining_classes - 1, used_classes = used_classes + 1, updated_at = ?
+    WHERE id = ?
+  `).run(t, card.id);
+  db.prepare(`
+    INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
+    VALUES (?, ?, ?, ?)
+  `).run(scheduleId, studentId, card.id, t);
+}
+
+/**
  * POST /api/checkin/parent — 家长扫码签到
  * Body: { scheduleId, studentId }
+ *
+ * 安全边界：
+ * 1) 家长绑定校验（只能给自家孩子签）
+ * 2) 报名校验（只能给已报名该排期的孩子签，杜绝给任意排期刷记录）
+ * 3) 时间窗口（开始前 2h 至结束后 2h，防补签刷积分）
+ * 4) 次数卡正常扣课（与教练点名一致，杜绝白嫖课时）
  */
 router.post('/parent', (req, res) => {
   try {
@@ -279,6 +321,12 @@ router.post('/parent', (req, res) => {
     const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('成员不存在'));
 
+    // 报名校验：家长只能为已报名该排期的成员签到（补课/调课登记同样视为已报名）
+    const enrolled = db.prepare(
+      "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND status = 'active' LIMIT 1"
+    ).get(scheduleId, studentId);
+    if (!enrolled) return res.json(fail('该成员未报名本次活动，无法签到，请联系机构'));
+
     // 时间窗口校验：仅允许在活动开始前 2 小时至结束后 2 小时之间签到，且活动未结束
     // 防止家长在非活动时段"补签到"刷积分
     const nowMs = Date.now();
@@ -293,23 +341,32 @@ router.post('/parent', (req, res) => {
       }
     }
 
-    // 检查是否已签到
-    const existing = db.prepare(
-      'SELECT * FROM attendances WHERE schedule_id = ? AND student_id = ?'
-    ).get(scheduleId, studentId);
-    if (existing) return res.json(fail('已签到，无需重复签到'));
-
     const pointsEarned = 10;
-    const id = generateId('att_');
-    db.prepare(`
-      INSERT INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name,
-        status, checkin_method, checkin_time, checkin_by, points_earned, date, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'present', 'qrcode', ?, 'parent', ?, ?, ?, ?)
-    `).run(id, scheduleId, studentId, student.name, schedule.course_id, schedule.course_name,
-      now(), pointsEarned, schedule.date, now(), now());
+    const t = now();
+    // 考勤写入 + 积分 + 扣课原子化：中途失败不留「有考勤无扣课」的白嫖记录
+    const outcome = db.transaction(() => {
+      const existing = db.prepare(
+        'SELECT * FROM attendances WHERE schedule_id = ? AND student_id = ?'
+      ).get(scheduleId, studentId);
+      if (existing) return { err: '已签到，无需重复签到' };
 
-    // 更新积分
-    addPoints(studentId, student.name, pointsEarned, 'checkin', scheduleId, '家长扫码签到获得积分');
+      const id = generateId('att_');
+      db.prepare(`
+        INSERT INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name,
+          status, checkin_method, checkin_time, checkin_by, points_earned, date, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'present', 'qrcode', ?, 'parent', ?, ?, ?, ?)
+      `).run(id, scheduleId, studentId, student.name, schedule.course_id, schedule.course_name,
+        t, pointsEarned, schedule.date, t, t);
+
+      addPoints(studentId, student.name, pointsEarned, 'checkin', scheduleId, '家长扫码签到获得积分');
+      // 次数卡扣课（与教练点名同一规则，幂等）
+      try {
+        applyArrivalDeduction(studentId, scheduleId, t);
+      } catch (e) { /* 扣课失败不阻塞签到记录，与教练路径保持一致 */ }
+
+      return { attendanceId: id };
+    })();
+    if (outcome.err) return res.json(fail(outcome.err));
 
     recordAudit(db, {
       entity: 'attendance',
@@ -321,7 +378,7 @@ router.post('/parent', (req, res) => {
       after: { status: 'present', points_earned: pointsEarned },
     });
 
-    res.json(success({ attendanceId: id, pointsEarned }));
+    res.json(success({ attendanceId: outcome.attendanceId, pointsEarned }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }

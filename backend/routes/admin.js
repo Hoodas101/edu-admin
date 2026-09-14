@@ -8,11 +8,7 @@ const router = express.Router();
 const db = require('../db');
 const { success, fail, safeFail, generateId, getOpenId, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser } = require('../utils');
 
-// 兼容迁移：班级/活动归档标记
-try { db.prepare("ALTER TABLE courses ADD COLUMN archived INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-// 兼容迁移：教练课时单价（元/节，课时费核算）
-try { db.prepare("ALTER TABLE teachers ADD COLUMN class_fee REAL DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE teachers ADD COLUMN pay_rule TEXT").run(); } catch (e) { /* 已存在 */ }
+// courses.archived / teachers.class_fee / teachers.pay_rule 列已收编至 migrations/011
 
 // 管理接口权限校验：管理员全部放行；拥有看板权限的员工（如销售）放行只读查询，写操作再按路由校验
 router.use((req, res, next) => {
@@ -48,18 +44,22 @@ const staffRead = (req, res, next) => {
 };
 
 /**
- * GET /api/admin/dashboard — 数据看板
- * 返回核心运营指标：成员数、今日课表、今日签到、今日订单、即将到期卡、到场率
+ * 看板数据守卫：含全机构收入/订单等经营数据，仅管理员或显式拥有 dashboard 权限的员工可见。
+ * 顶部 guard 按教练角色放行是给课务参考数据（teachers/courses 下拉）用的，
+ * 不代表教练可读财务报表；Web 路由与小程序 hasPerm('dashboard') 均按权限判定，后端补齐同一契约。
  */
-router.get('/dashboard', (req, res, next) => {
-  // 看板含全机构收入/订单等经营数据：仅管理员或显式拥有 dashboard 权限的员工（销售）可见。
-  // 顶部 guard 按教练角色放行是给课务参考数据（teachers/courses 下拉）用的，
-  // 不代表教练可读财务报表；Web 路由与小程序 hasPerm('dashboard') 均按权限判定，后端补齐同一契约。
+const dashboardGuard = (req, res, next) => {
   if (!isAdminReq(req) && !hasPerm(getReqUser(req), 'dashboard')) {
     return res.status(403).json({ code: 403, data: null, message: '无权限查看数据看板' });
   }
   next();
-}, (req, res) => {
+};
+
+/**
+ * GET /api/admin/dashboard — 数据看板
+ * 返回核心运营指标：成员数、今日课表、今日签到、今日订单、即将到期卡、到场率
+ */
+router.get('/dashboard', dashboardGuard, (req, res) => {
   try {
     const today = formatDate(now());
     const currentTime = now();
@@ -283,7 +283,7 @@ router.get('/dashboard', (req, res, next) => {
  * GET /api/admin/charts — 看板图表数据
  * 近7天到场率、报名活动分布、产品销量统计
  */
-router.get('/charts', (req, res) => {
+router.get('/charts', dashboardGuard, (req, res) => {
   try {
     // 到场趋势支持按周期查询：week=近7天，month=近30天（默认 week，与看板“本周/本月”切换联动）
     const period = req.query.period === 'month' ? 'month' : 'week';
@@ -742,7 +742,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
             db.prepare('UPDATE users SET phone = ?, openid = ?, updated_at = ? WHERE id = ?')
               .run(newPhone, `phone_${newPhone}`, now(), oldUser.id);
           } else {
-            db.prepare("UPDATE users SET status = 'inactive' WHERE id = ?").run(oldUser.id);
+            db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE id = ?").run(now(), oldUser.id);
           }
         }
       }
@@ -752,7 +752,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
       syncCoachAccount(newPhone || oldPhone, name || existing.name);
     }
     if (status === 'inactive') {
-      db.prepare("UPDATE users SET status = 'inactive' WHERE phone = ?").run(newPhone || oldPhone);
+      db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?").run(now(), newPhone || oldPhone);
     }
 
     // 修改权限：同步登录账号角色（coach / admin / sales）与自定义权限
@@ -766,6 +766,10 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
       if (permissions !== undefined) {
         updates.push('permissions = ?');
         params.push(Array.isArray(permissions) ? JSON.stringify(permissions) : '');
+      }
+      // 角色变更需吊销旧 Token（role 固化在 JWT payload 中，否则降级后旧 Token 仍携带原角色）
+      if (hasValidRole && targetUser && targetUser.role !== role) {
+        updates.push('token_version = COALESCE(token_version,0) + 1');
       }
       if (updates.length) {
         params.push(now(), permUser.id);
@@ -784,7 +788,8 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
     if (resetPassword) {
       const targetPhone = newPhone || oldPhone;
       if (targetPhone) {
-        db.prepare("UPDATE users SET password = ?, updated_at = ? WHERE phone = ?")
+        // bump token_version：重置后该账号旧 Token 全部失效
+        db.prepare("UPDATE users SET password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?")
           .run(hashPassword(STAFF_DEFAULT_PASSWORD), now(), targetPhone);
       }
     }
@@ -815,9 +820,9 @@ router.delete('/teachers/:id', adminOnly, (req, res) => {
       }
     }
     db.prepare("UPDATE teachers SET status = 'inactive' WHERE id = ?").run(req.params.id);
-    // 同步停用教练登录账号
+    // 同步停用教练登录账号（bump token_version 吊销其旧 Token）
     if (existing.phone) {
-      db.prepare("UPDATE users SET status = 'inactive' WHERE phone = ?").run(existing.phone);
+      db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?").run(now(), existing.phone);
     }
     // 该教师未来的排课置空待重新分配（保留课程，避免家长端显示已停用教师）
     db.prepare(`

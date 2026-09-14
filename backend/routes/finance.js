@@ -74,16 +74,29 @@ router.get('/summary', (req, res) => {
       GROUP BY order_type
     `).all(start, end);
 
-    // 教师课时费支出（payroll_logs 表可能为空/不存在，需容错）
-    // 注意：payroll_logs 当前无任何写入方（师资成本未被计入），netProfit 因此被高估。
-    // 以下仅作兜底读取，不改计算逻辑；真实师资成本待 payroll_logs 打通后才会影响净利润。
+    // 教师课时费支出：仅统计已结算记录，按「薪资所属月份」归属（与 monthly 口径一致），
+    // 避免次月结算上月工资时落在查询区间之外。
+    const ymOf = (ms) => {
+      const d = new Date(ms);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    };
+    const monthsInRange = [];
+    {
+      let cur = ymOf(start); const endYm = ymOf(end);
+      while (cur <= endYm && monthsInRange.length < 24) {
+        monthsInRange.push(cur);
+        const [y, m] = cur.split('-').map(Number);
+        cur = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+      }
+    }
     let coachPay = { total_pay: 0 };
     try {
+      const ph = monthsInRange.map(() => '?').join(',');
       coachPay = db.prepare(`
         SELECT COALESCE(SUM(amount), 0) as total_pay
         FROM payroll_logs
-        WHERE paid_at >= ? AND paid_at <= ?
-      `).get(start, end) || { total_pay: 0 };
+        WHERE status = 'settled' AND month IN (${ph})
+      `).get(...monthsInRange) || { total_pay: 0 };
     } catch (e) { /* payroll_logs 表不存在时跳过 */ }
 
     const netRevenue = (paidOrders.total_revenue || 0) - (refunded.refund_amount || 0);
@@ -104,8 +117,11 @@ router.get('/summary', (req, res) => {
       expense: {
         coachPay: coachPay.total_pay || 0,
       },
-      // 缺口标注：payroll_logs 当前无任何写入方，师资成本尚未计入，净利润被高估
-      expenseNote: '师资成本尚未计入（payroll_logs 待打通），当前净利润未扣除教师课时费',
+      // 净利润口径：师资成本按 payroll_logs 中已结算（settled）记录扣除；
+      // 未结算月份该笔支出计 0（属正常口径，非缺陷），在「薪资结算」页执行结算后自动变真。
+      expenseNote: coachPay.total_pay > 0
+        ? ''
+        : '本月暂无已结算师资成本，净利润未扣除教师课时费（可在「薪资结算」中按月结算）',
       profit: netProfit,
       byType: byType.map(t => ({
         type: t.order_type || 'other',
@@ -145,17 +161,16 @@ router.get('/monthly', (req, res) => {
     `).all(startMs, endMs);
 
     // 教师课时费支出按月统计（容错：表可能不存在）
-    // 同上：payroll_logs 无写入方，coachPay 实际恒为 0，profit 被高估
+    // 归属到「薪资所属月份」（month 字段）而非结算操作时间；仅统计已结算记录
     let coachPayByMonth = [];
     try {
       coachPayByMonth = db.prepare(`
-        SELECT
-          strftime('%m', datetime(paid_at/1000, 'unixepoch', 'localtime')) as month,
+        SELECT substr(month, 6, 2) as month,
           COALESCE(SUM(amount), 0) as total_pay
         FROM payroll_logs
-        WHERE paid_at >= ? AND paid_at <= ?
+        WHERE status = 'settled' AND month LIKE ?
         GROUP BY month
-      `).all(startMs, endMs);
+      `).all(`${year}-%`);
     } catch (e) { /* payroll_logs 表不存在时跳过 */ }
 
     // 合并数据
@@ -190,7 +205,9 @@ router.get('/monthly', (req, res) => {
       orderCount: acc.orderCount + r.orderCount,
     }), { revenue: 0, discount: 0, refunded: 0, netRevenue: 0, coachPay: 0, profit: 0, orderCount: 0 });
 
-    res.json(success({ year, months: result, totals, expenseNote: '师资成本尚未计入（payroll_logs 待打通），净利润未扣除教师课时费' }));
+    res.json(success({ year, months: result, totals, expenseNote: totals.coachPay > 0
+      ? ''
+      : '本年度暂无已结算师资成本，净利润未扣除教师课时费（可在「薪资结算」中按月结算）' }));
   } catch (err) {
     console.error('[finance monthly]', err);
     res.status(500).json(safeFail('获取月度报表失败'));
@@ -235,7 +252,9 @@ router.get('/by-product', (req, res) => {
 
       const payable = Number(order.payable_amount) || 0;
       const refunded = Number(order.refunded_amount) || 0;
-      const gross = items.reduce((s, it) => s + (Number(it.price) || 0) * (Number(it.quantity) || 1), 0);
+      // 订单明细写入字段是 unitPrice（orders.js）；兼容历史数据以 price 回退，否则 gross 恒为 0 退化为均分
+      const unitOf = (it) => Number(it.unitPrice ?? it.price) || 0;
+      const gross = items.reduce((s, it) => s + unitOf(it) * (Number(it.quantity) || 1), 0);
 
       items.forEach((item) => {
         const name = item.itemName || item.name || '未命名';
@@ -243,7 +262,7 @@ router.get('/by-product', (req, res) => {
         const qty = Number(item.quantity) || 1;
         productMap[name].count += qty;
 
-        const itemValue = (Number(item.price) || 0) * qty;
+        const itemValue = unitOf(item) * qty;
         let revenueShare = 0, refundShare = 0;
         if (gross > 0) {
           const w = itemValue / gross;

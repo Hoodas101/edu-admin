@@ -88,6 +88,10 @@ const seed = db.transaction(() => {
   ins(`INSERT OR IGNORE INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name, status, checkin_method, checkin_time, checkin_by, points_earned, date, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     'att_seed', 'sched_cls', 'stu2', '小红', 'course1', '篮球基础班', 'present', 'manual', t, 'teacher', 0, '2026-08-26', t, t);
+  // stu1 报名公开排期（家长扫码签到现已要求「已报名」前置校验）
+  ins(`INSERT OR IGNORE INTO enrollments (id, student_id, student_name, course_id, course_name, schedule_id, enroll_type, status, enrolled_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    'enr_seed_pub1', 'stu1', '小明', 'course1', '篮球基础班', 'sched_pub', 'schedule', 'active', t, t, t);
 });
 seed();
 
