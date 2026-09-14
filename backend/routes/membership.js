@@ -350,17 +350,21 @@ router.get('/my', (req, res) => {
     }
 
     // 补充会员中心所需字段：购买时间（激活时间回退创建时间）与累计购买次数（该成员已支付订单数）
-    const enriched = cards.map((c) => {
-      const orders = db.prepare(`
-        SELECT COUNT(*) as count FROM orders
-        WHERE student_id = ? AND status = 'paid'
-      `).get(c.student_id);
-      return {
-        ...c,
-        purchased_at: c.activated_at || c.created_at || null,
-        purchase_count: orders.count || 0,
-      };
-    });
+    // 单次 GROUP BY 聚合替代逐卡 COUNT（N+1：多孩家庭多卡时每次进会员中心都打一圈查询）
+    const studentIds = [...new Set(cards.map((c) => c.student_id))];
+    const countMap = {};
+    if (studentIds.length) {
+      const ph = studentIds.map(() => '?').join(',');
+      db.prepare(`
+        SELECT student_id, COUNT(*) as count FROM orders
+        WHERE student_id IN (${ph}) AND status = 'paid' GROUP BY student_id
+      `).all(...studentIds).forEach((r) => { countMap[r.student_id] = r.count; });
+    }
+    const enriched = cards.map((c) => ({
+      ...c,
+      purchased_at: c.activated_at || c.created_at || null,
+      purchase_count: countMap[c.student_id] || 0,
+    }));
 
     res.json(success(enriched));
   } catch (err) {
@@ -397,31 +401,42 @@ router.post('/deduct', (req, res) => {
 
     if (!card) return res.json(fail('没有可用会员卡'));
 
-    // 时效制会员：无需扣课，直接记录出席即可
+    // 时效制会员：无需扣课，直接记录出席即可（日志与幂等检查同事务，防并发重复记录）
     const mode = card.billing_mode || 'time';
     if (mode === 'time') {
-      db.prepare(`
-        INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-        VALUES (?, ?, ?, ?)
-      `).run(scheduleId, studentId, card.id, now());
+      db.transaction(() => {
+        db.prepare(`
+          INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
+          SELECT ?, ?, ?, ? WHERE NOT EXISTS (
+            SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?
+          )
+        `).run(scheduleId, studentId, card.id, now(), scheduleId, studentId);
+      })();
       return res.json(success({ cardId: card.id, mode: 'time', deducted: 0, message: '时效制会员无需扣课' }));
     }
 
     // 查找可用会员卡
     if (card.remaining_classes < n) return res.json(fail('剩余训练时长不足'));
 
-    // 扣课
-    db.prepare(`
-      UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ? WHERE id = ?
-    `).run(n, n, now(), card.id);
+    // 扣课 + 日志同事务；UPDATE 带 remaining >= n 条件守卫，
+    // 杜绝并发扣同一张卡把余额扣成负数（检查与扣减之间的竞态）
+    const deductOutcome = db.transaction(() => {
+      const dup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
+      if (dup) return { err: '已扣过训练时长，无需重复扣课' };
+      const upd = db.prepare(`
+        UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ?
+        WHERE id = ? AND remaining_classes >= ?
+      `).run(n, n, now(), card.id, n);
+      if (upd.changes === 0) return { err: '剩余训练时长不足' };
+      db.prepare(`
+        INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
+        VALUES (?, ?, ?, ?)
+      `).run(scheduleId, studentId, card.id, now());
+      return { cardId: card.id };
+    })();
+    if (deductOutcome.err) return res.json(fail(deductOutcome.err));
 
-    // 记录扣课日志
-    db.prepare(`
-      INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-      VALUES (?, ?, ?, ?)
-    `).run(scheduleId, studentId, card.id, now());
-
-    const updatedCard = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(card.id);
+    const updatedCard = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(deductOutcome.cardId);
     res.json(success({
       cardId: card.id,
       mode: 'count',

@@ -174,9 +174,16 @@ app.get(/^\/(?!api\/|assets\/|favicon\.ico).*/, (req, res) => {
   res.sendFile(path.join(__dirname, '../web-admin/dist/index.html'));
 });
 
-// 健康检查
+// 健康检查：附带 DB 探测。进程活着但库坏了（磁盘满/文件损坏）时，
+// 必须报 503，否则 Docker/pm2 健康检查误判为健康、流量继续打到死库。
 app.get('/api/health', (req, res) => {
-  res.json({ code: 0, data: { status: 'ok', time: Date.now() }, message: '服务运行正常' });
+  try {
+    db.prepare('SELECT 1').get();
+    res.json({ code: 0, data: { status: 'ok', time: Date.now() }, message: '服务运行正常' });
+  } catch (e) {
+    console.error('[health] DB 探测失败:', e.message);
+    res.status(503).json({ code: 503, data: { status: 'db_error', time: Date.now() }, message: '数据库不可用' });
+  }
 });
 
 // API 路由
@@ -238,9 +245,16 @@ server.on('error', (err) => {
   }
 });
 
-// 进程级错误兜底：未捕获异常 / 未处理 Promise 拒绝，仅记录不退出，避免单体服务整体崩溃
+// 进程级错误兜底：
+// - 测试环境（NODE_ENV=test）：仅记录不退出，保证进程内 require('../server') 的测试套件继续跑；
+// - 生产环境：未捕获异常后进程状态不可信（可能半写入/坏连接），记录后退出，
+//   由 pm2 / docker restart 拉起干净实例。静默续跑会让坏状态持续服务、放大故障。
 process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err && err.stack ? err.stack : err);
+  if (process.env.NODE_ENV !== 'test') {
+    process.exitCode = 1;
+    setTimeout(() => process.exit(1), 500).unref();
+  }
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);

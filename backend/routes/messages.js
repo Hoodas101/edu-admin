@@ -30,6 +30,37 @@ function isReadFor(row, openid) {
   return !!r;
 }
 
+/**
+ * 家长可见的广播通知（与 /list、/unread-count 同一判定）：
+ * 定向(group_name)仅本班（已报名该课程）可见；勿扰家长不见营销类；管理员可见全部。
+ */
+function visibleBroadcastIds(openid) {
+  const user = db.prepare('SELECT role FROM users WHERE openid = ?').get(openid);
+  const isAdmin = !!(user && user.role === 'admin');
+  if (isAdmin) {
+    return db.prepare("SELECT id FROM notifications WHERE is_broadcast = 1 AND status = 'sent'").all().map(r => r.id);
+  }
+  const suppressed = !!db.prepare(`
+    SELECT 1 FROM suppressions sp
+    JOIN parent_bindings pb ON pb.parent_openid = ? AND pb.parent_phone = sp.phone
+    WHERE sp.type = 'marketing' LIMIT 1
+  `).get(openid);
+  return db.prepare(`
+    SELECT n.id FROM notifications n
+    WHERE n.is_broadcast = 1 AND n.status = 'sent'
+      ${suppressed ? "AND n.category != 'marketing'" : ''}
+      AND (
+        n.group_name = ''
+        OR EXISTS (
+          SELECT 1 FROM enrollments e
+          JOIN schedules s ON s.id = e.schedule_id
+          WHERE e.student_id IN (SELECT student_id FROM parent_bindings pb WHERE pb.parent_openid = ?)
+            AND s.course_name = n.group_name
+        )
+      )
+  `).all(openid).map(r => r.id);
+}
+
 // 标记已读
 function markRead(row, openid) {
   if (!row || !openid) return;
@@ -278,14 +309,13 @@ router.post('/read-all', (req, res) => {
     if (!openid) return res.json(fail('未登录'));
     // 个人通知
     db.prepare("UPDATE notifications SET status = 'read' WHERE user_id = ? AND status = 'sent'").run(openid);
-    // 广播通知（按用户记录）
-    const broadcasts = db.prepare(
-      "SELECT id FROM notifications WHERE is_broadcast = 1 AND status = 'sent'"
-    ).all();
+    // 广播通知（按用户记录）：仅标记本用户可见的广播，
+    // 此前会把他人定向班级/勿扰营销广播也写成已读，污染送达统计
+    const ids = visibleBroadcastIds(openid);
     const insert = db.prepare('INSERT OR IGNORE INTO notification_reads (notification_id, user_id, read_at) VALUES (?, ?, ?)');
     const t = now();
     db.transaction(() => {
-      for (const b of broadcasts) insert.run(b.id, openid, t);
+      for (const id of ids) insert.run(id, openid, t);
     })();
     res.json(success({ readAll: true }));
   } catch (err) {
@@ -368,6 +398,7 @@ router.get('/my', (req, res) => {
     if (!openid) return res.json(fail('未登录'));
 
     const limit = Math.min(100, parseInt(req.query.limit) || 50);
+    const offset = Math.max(0, parseInt(req.query.offset) || 0);
     const { unreadOnly } = req.query;
 
     let sql = 'SELECT * FROM notifications WHERE user_id = ?';
@@ -377,8 +408,8 @@ router.get('/my', (req, res) => {
       sql += " AND status = 'sent'";
     }
 
-    sql += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(limit);
+    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
 
     const list = db.prepare(sql).all(...params);
 
@@ -387,7 +418,7 @@ router.get('/my', (req, res) => {
       "SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND status = 'sent'"
     ).get(openid).count;
 
-    res.json(success({ list, unreadCount }));
+    res.json(success({ list, unreadCount, hasMore: list.length === limit }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }

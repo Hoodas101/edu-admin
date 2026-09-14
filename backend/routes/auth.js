@@ -541,29 +541,55 @@ router.post('/updateProfile', (req, res) => {
         return res.status(400).json(safeFail('该手机号已被其他账号使用'));
       }
       const oldPhone = user.phone || '';
+      const oldOpenid = user.openid;
       finalPhone = phone;
       // 微信身份账号保留微信 openid（微信登录需继续匹配原账号），
       // 仅更新手机号；手机号身份账号（phone_ 前缀）随手机号更新 openid
       const isWechatIdentity = String(user.openid || '').startsWith('wx_');
-      if (isWechatIdentity) {
-        db.prepare('UPDATE users SET phone = ?, updated_at = ? WHERE id = ?')
-          .run(phone, now(), user.id);
-      } else {
-        finalOpenid = `phone_${phone}`;
-        db.prepare('UPDATE users SET phone = ?, openid = ?, updated_at = ? WHERE id = ?')
-          .run(phone, finalOpenid, now(), user.id);
-      }
+      if (!isWechatIdentity) finalOpenid = `phone_${phone}`;
 
-      // 同步教师档案手机号（教练）
-      if (user.role === 'coach' && oldPhone) {
-        db.prepare('UPDATE teachers SET phone = ? WHERE phone = ?').run(phone, oldPhone);
-      }
-      // 同步家长绑定关系（家长）
-      db.prepare(`
-        UPDATE parent_bindings
-        SET parent_openid = ?, parent_phone = ?
-        WHERE parent_openid = ?
-      `).run(finalOpenid, phone, user.openid);
+      // openid 变更时，历史数据全部跟随账号迁移（同事务）：
+      // 旧实现只迁 parent_bindings，订单/通知/请假/反馈等按 openid 归属，改号后成孤儿——
+      // 家长改手机号后「我的订单」清空、历史通知失联。
+      db.transaction(() => {
+        if (isWechatIdentity) {
+          db.prepare('UPDATE users SET phone = ?, updated_at = ? WHERE id = ?')
+            .run(phone, now(), user.id);
+          // 微信身份 openid 不变：家长绑定里的 parent_phone 仍需刷新
+          db.prepare('UPDATE parent_bindings SET parent_phone = ? WHERE parent_openid = ?')
+            .run(phone, oldOpenid);
+        } else {
+          db.prepare('UPDATE users SET phone = ?, openid = ?, updated_at = ? WHERE id = ?')
+            .run(phone, finalOpenid, now(), user.id);
+          if (finalOpenid !== oldOpenid) {
+            const mig = [
+              "UPDATE parent_bindings SET parent_openid = ?, parent_phone = ? WHERE parent_openid = ?",
+              "UPDATE orders SET user_id = ? WHERE user_id = ?",
+              "UPDATE payments SET user_id = ? WHERE user_id = ?",
+              "UPDATE notifications SET user_id = ? WHERE user_id = ?",
+              "UPDATE notification_reads SET user_id = ? WHERE user_id = ?",
+              "UPDATE feedback SET user_id = ? WHERE user_id = ?",
+              "UPDATE leave_requests SET parent_openid = ? WHERE parent_openid = ?",
+              "UPDATE trial_bookings SET parent_openid = ? WHERE parent_openid = ?",
+              "UPDATE subscribe_msg_logs SET openid = ? WHERE openid = ?",
+              "UPDATE teachers SET user_id = ? WHERE user_id = ?",
+            ];
+            const args = {
+              parent_bindings: [finalOpenid, phone, oldOpenid],
+              default: [finalOpenid, oldOpenid],
+            };
+            for (const sql of mig) {
+              const key = sql.includes('parent_phone') ? 'parent_bindings' : 'default';
+              try { db.prepare(sql).run(...args[key]); } catch (e) { /* 列不存在等异常跳过该表 */ }
+            }
+          }
+        }
+
+        // 同步教师档案手机号（教练）
+        if (user.role === 'coach' && oldPhone) {
+          db.prepare('UPDATE teachers SET phone = ? WHERE phone = ?').run(phone, oldPhone);
+        }
+      })();
     }
 
     // 昵称 / 头像
@@ -623,7 +649,8 @@ router.post('/changePassword', (req, res) => {
     const openid = getOpenId(req);
     if (!openid) return res.status(401).json(safeFail('未登录'));
 
-    const user = db.prepare("SELECT * FROM users WHERE openid = ? AND role IN ('admin','coach')").get(openid);
+    // 员工三角色（管理员/教练/销售）均需自助改密；此前漏了 sales，销售无法改初始密码
+    const user = db.prepare("SELECT * FROM users WHERE openid = ? AND role IN ('admin','coach','sales')").get(openid);
     if (!user) return res.status(403).json(safeFail('当前账号无需设置密码'));
 
     const pwdResult = verifyPassword(oldPassword || '', user.password || '');

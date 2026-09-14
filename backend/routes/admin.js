@@ -539,10 +539,20 @@ router.get('/teachers', staffRead, (req, res) => {
     // includeInactive=1 时同时返回停用教练（管理页需要看到停用项以便恢复）
     const where = req.query.includeInactive === '1' ? '' : "WHERE status = 'active'";
     const isAdmin = isAdminReq(req);
-    const list = db.prepare(`
+    const teachers = db.prepare(`
       SELECT *
       FROM teachers ${where} ORDER BY created_at ASC
-    `).all().map((t) => {
+    `).all();
+    // 批量取关联数据，替代逐教练查 users/schedules（N+1×3）
+    const userByPhone = {};
+    db.prepare("SELECT phone, role, permissions FROM users WHERE phone IS NOT NULL AND phone != ''").all()
+      .forEach((u) => { userByPhone[u.phone] = u; });
+    const scheduleCountByTeacher = {};
+    db.prepare(`
+      SELECT teacher_id, COUNT(*) as count FROM schedules
+      WHERE status = 'scheduled' AND date >= date('now') GROUP BY teacher_id
+    `).all().forEach((r) => { scheduleCountByTeacher[r.teacher_id] = r.count; });
+    const list = teachers.map((t) => {
       const out = { ...t };
       // 手机号、薪酬规则与单课时费仅管理员可见，避免向教练/销售泄露
       if (!isAdmin) {
@@ -556,17 +566,11 @@ router.get('/teachers', staffRead, (req, res) => {
       }
       out.payRule = payRule;
       // 关联登录账号角色与自定义权限
-      out.role = t.phone
-        ? (db.prepare('SELECT role FROM users WHERE phone = ?').get(t.phone) || {}).role || 'coach'
-        : 'coach';
-      out.permissions = t.phone
-        ? resolvePerms(db.prepare('SELECT role, permissions FROM users WHERE phone = ?').get(t.phone) || { role: 'coach' })
-        : resolvePerms({ role: 'coach' });
+      const linked = (t.phone && userByPhone[t.phone]) || null;
+      out.role = linked ? (linked.role || 'coach') : 'coach';
+      out.permissions = resolvePerms(linked || { role: 'coach' });
       // 该教练未来排课数量（详情展示）
-      out.scheduleCount = db.prepare(`
-        SELECT COUNT(*) as count FROM schedules
-        WHERE teacher_id = ? AND status = 'scheduled' AND date >= date('now')
-      `).get(t.id).count;
+      out.scheduleCount = scheduleCountByTeacher[t.id] || 0;
       return out;
     });
     res.json(success({ list, total: list.length }));
@@ -622,14 +626,17 @@ router.get('/parents', adminOnly, (req, res) => {
  */
 router.get('/staff-options', (req, res) => {
   try {
-    const list = db.prepare(`
+    const teachers = db.prepare(`
       SELECT id, name, phone FROM teachers WHERE status = 'active' ORDER BY created_at ASC
-    `).all().map((t) => ({
+    `).all();
+    // 一次取全部「手机号→角色」映射，替代逐教练查 users（N+1）
+    const roleByPhone = {};
+    db.prepare("SELECT phone, role FROM users WHERE phone != '' AND phone IS NOT NULL").all()
+      .forEach((u) => { roleByPhone[u.phone] = u.role; });
+    const list = teachers.map((t) => ({
       id: t.id,
       name: t.name,
-      role: t.phone
-        ? (db.prepare('SELECT role FROM users WHERE phone = ?').get(t.phone) || {}).role || 'coach'
-        : 'coach',
+      role: (t.phone && roleByPhone[t.phone]) || 'coach',
     }));
     res.json(success({ list, total: list.length }));
   } catch (err) {
@@ -938,21 +945,41 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
     const existing = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
     if (!existing) return res.json(fail('活动不存在'));
     const scheds = db.prepare('SELECT id FROM schedules WHERE course_id = ?').all(req.params.id);
-    if (scheds.length) {
-      const ph = scheds.map(() => '?').join(',');
-      const ids = scheds.map((s) => s.id);
-      // 级联清理排期关联数据，避免孤儿记录（请假/扣课日志/签到积分流水/训练点评）
-      db.prepare('DELETE FROM enrollments WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM attendances WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM leave_requests WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM deduction_logs WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM point_logs WHERE reference_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM coach_comments WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM schedules WHERE id IN (' + ph + ')').run(...ids);
-    }
-    db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
+    // 级联清理包事务：中途失败会留下「报名已删、排期还在」的半删状态。
+    // 删除签到流水时同步回滚 points.balance/total_earned——此前只删流水不改余额，
+    // 学员积分账户凭空多出已删除活动的分数，兑换时账实不符。
+    db.transaction(() => {
+      if (scheds.length) {
+        const ph = scheds.map(() => '?').join(',');
+        const ids = scheds.map((s) => s.id);
+        // 级联清理排期关联数据，避免孤儿记录（请假/扣课日志/签到积分流水/训练点评）
+        // 先按待删 earn 流水回滚余额（逐学员聚合）
+        const affected = db.prepare(`
+          SELECT student_id, SUM(amount) total FROM point_logs
+          WHERE type = 'earn' AND reference_id IN (${ph}) GROUP BY student_id
+        `).all(...ids);
+        db.prepare('DELETE FROM enrollments WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM attendances WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM leave_requests WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM deduction_logs WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM point_logs WHERE reference_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM coach_comments WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM schedules WHERE id IN (' + ph + ')').run(...ids);
+        for (const a of affected) {
+          db.prepare(`
+            UPDATE points SET
+              total_earned = MAX(0, total_earned - ?),
+              balance = MAX(0, balance - ?),
+              updated_at = ?
+            WHERE student_id = ?
+          `).run(a.total, a.total, now(), a.student_id);
+        }
+      }
+      db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
+    })();
     res.json(success({ id: req.params.id }));
   } catch (err) {
+    console.error('[admin course delete]', err);
     res.status(500).json(safeFail('删除活动失败'));
   }
 });

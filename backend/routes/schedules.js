@@ -126,7 +126,7 @@ function ensureTempCourse() {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, effectiveCourseId, finalName, teacherId || '', finalTeacher, classroomId || '', classroom?.name || '',
       date, startTime, endTime, maxStudents || 0, remark || '', groupCourseId || '', groupName || '', classId || '',
-      (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, allow_self_booking ? 1 : 0, (student_ids && String(student_ids)) || '',
+      (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
       parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
 
     res.json(success({ id }));
@@ -155,6 +155,12 @@ router.post('/recursive', (req, res) => {
     }
     if (repeatType === 'custom' && (!intervalDays || intervalDays < 1)) {
       return res.json(fail('重复间隔天数必须大于 0'));
+    }
+    // 周期跨度上限 180 天：误填年份（如 2027）会一次生成上千条排期，难删且污染课表
+    {
+      const spanDays = (new Date(endDate) - new Date(startDate)) / 86400000;
+      if (!isFinite(spanDays) || spanDays < 0) return res.json(fail('结束日期不能早于开始日期'));
+      if (spanDays > 180) return res.json(fail('周期排期最长 180 天，请分批创建'));
     }
 
     // 支持自定义活动名称 / 手填教练
@@ -204,7 +210,7 @@ router.post('/recursive', (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, effectiveCourseId, finalName, teacherId || '', finalTeacher, classroomId || '', classroom?.name || '',
         dateStr, startTime, endTime, maxStudents || 0, ruleId, groupCourseId || '', groupName || '', classId || '',
-        (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, allow_self_booking ? 1 : 0, (student_ids && String(student_ids)) || '',
+        (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
         parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
       createdSchedules.push(id);
     }
@@ -576,6 +582,12 @@ router.post('/:id/enroll', (req, res) => {
 
     const s = db.prepare("SELECT * FROM schedules WHERE id = ? AND status = 'scheduled'").get(req.params.id);
     if (!s) return res.json(fail('活动不存在或已取消'));
+
+    // 自助报名开关：非管理员（家长/教练端自助）遇显式关闭时拒绝，须联系机构代报。
+    // （存量与新排期默认开启；关闭需在排课表单显式勾选，见 PUT 与 POST 写入端）
+    if (!isAdmin && Number(s.allow_self_booking) === 0) {
+      return res.json(fail('该活动未开放自助报名，请联系机构预约'));
+    }
 
     // 支持指定孩子报名（多孩家庭）；未指定时兼容旧行为取主绑定孩子
     const { studentId } = req.body || {};

@@ -57,30 +57,32 @@ router.post('/add', (req, res) => {
     const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('成员不存在'));
 
-    // 幂等检查
-    if (referenceId) {
-      const exist = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(referenceId);
-      if (exist) return res.json(success({ duplicated: true, balance: db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId)?.balance }));
-    }
-
     const currentTime = now();
+    // 幂等检查 + 建账/累加 + 流水写入同事务原子完成：
+    // 读-改-写分离时并发发放会丢更新，referenceId 去重也存在检查后插入的竞态窗口。
+    const result = db.transaction(() => {
+      if (referenceId) {
+        const exist = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(referenceId);
+        if (exist) {
+          const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
+          return { duplicated: true, balance: acc ? acc.balance : 0 };
+        }
+      }
+      const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(studentId);
+      if (!existAcc) {
+        db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(generateId('PTS'), studentId, student.name, amount, amount, currentTime);
+      } else {
+        db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
+          .run(amount, amount, currentTime, studentId);
+      }
+      const points = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
+      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(generateId('PLG'), studentId, 'earn', amount, points.balance, reason, referenceId, currentTime);
+      return { balance: points.balance, added: amount };
+    })();
 
-    // 查找或创建积分账户
-    const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(studentId);
-    if (!existAcc) {
-      db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(generateId('PTS'), studentId, student.name, amount, amount, currentTime);
-    } else {
-      db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
-        .run(amount, amount, currentTime, studentId);
-    }
-
-    const points = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
-    // 记录流水
-    db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(generateId('PLG'), studentId, 'earn', amount, points.balance, reason, referenceId, currentTime);
-
-    res.json(success({ balance: points.balance, added: amount }));
+    res.json(success(result));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }

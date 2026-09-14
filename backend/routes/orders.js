@@ -553,6 +553,7 @@ router.put('/:id', (req, res) => {
 
     const fields = [];
     const params = [];
+    let syncPaymentAmount = null;
     if (payableAmount !== undefined) {
       const amount = Number(payableAmount);
       if (!isFinite(amount) || amount < 0) return res.json(fail('金额不合法'));
@@ -561,15 +562,20 @@ router.put('/:id', (req, res) => {
       if (amount < refundedSoFar) return res.json(fail(`金额不能低于已退款金额 ¥${refundedSoFar}`));
       fields.push('payable_amount = ?');
       params.push(amount);
-      // 同步支付记录金额
-      db.prepare('UPDATE payments SET amount = ? WHERE order_id = ?').run(amount, id);
+      syncPaymentAmount = amount;
     }
     if (salesperson !== undefined) { fields.push('salesperson = ?'); params.push(String(salesperson)); }
     if (remark !== undefined) { fields.push('remark = ?'); params.push(String(remark)); }
     if (fields.length === 0) return res.json(fail('没有需要修改的内容'));
 
     params.push(now(), id);
-    db.prepare(`UPDATE orders SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);
+    // 改价与支付流水同步必须同事务：中途失败会留下「订单已改价、流水仍旧金额」的对账裂缝
+    db.transaction(() => {
+      if (syncPaymentAmount !== null) {
+        db.prepare('UPDATE payments SET amount = ? WHERE order_id = ?').run(syncPaymentAmount, id);
+      }
+      db.prepare(`UPDATE orders SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);
+    })();
     res.json(success({ id }));
   } catch (err) {
     console.error('[orders update]', err);
