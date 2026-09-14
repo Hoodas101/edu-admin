@@ -30,7 +30,53 @@
 - 一键部署 `deploy.sh`（免 Docker 原生路径）+ 全中文文档
   （README / 使用手册 / 部署上线说明 / 常见问题 FAQ / TEST-GUIDE）
 - 可定制机构称呼（老师/学员/会员全站替换），全部业务规则可配置
-- 生产模式强制 `JWT_SECRET`，未配置拒绝启动；每日自动备份 + Web 一键导出
+- JWT 安全：未配置 `JWT_SECRET` 时首次启动自动生成强随机密钥并持久化
+  （`backend/db/.jwt-secret`，随数据库备份），绝不使用硬编码默认值；
+  每日自动备份 + Web 一键导出
+
+## [Unreleased] - 2026-09-14
+
+多视角深度审计（机构管理者 / 教练 / 销售 / 家长 / 工程师 / 设计师）后的四批修复。
+
+### 安全 Security
+
+- 家长手机号免密登录改为环境变量开关 `PARENT_PHONE_LOGIN`（生产默认关闭），
+  堵住账号接管面；微信一键登录路径不受影响
+- JWT 增加 `token_version` 吊销链：停用 / 改密 / 角色变更 / 删除员工即时作废旧 Token
+  （全员需重新登录一次，为本次安全升级的预期代价）
+- 签到套利修复：家长扫码补报名校验、次数卡扣课、QR nonce 验证
+- 越权修复：排期 PUT 归属校验、他人学员名册裁剪、/charts 权限、微信支付订单归属、
+  `INSERT OR REPLACE` 覆盖支付记录去除
+- 部署安全：seed 三重守卫（`seed.js` 非空库需 `--force`、`deploy/deploy.sh` 检测
+  有数据即跳过、Deploy 工作流 `seed_demo_data` 默认 false）——重跑部署不再清空生产库；
+  `remote-deploy.sh` 保留 `.env`（JWT_SECRET 不再随重部署重置全员掉线）
+
+### 修复 Fixed
+
+- 资金正确性：退卡按 `unitPrice` 找价（原按 `price` 永不命中导致超退）、
+  退款金额上限与 refund_rules 复算、取消订单多步回滚入事务、会员编号漂移修复
+- 一致性：课时/积分/扣卡/分班等 12 处读改写补事务边界；备份目录跟随 `DB_PATH`
+  （Docker 卷内不再落可写层丢失）；health 加 `SELECT 1` 真实探测；
+  微信支付未配置时诚实失败而非假成功；`allow_self_booking` 开关落地
+- 薪资：新增 `POST /api/payroll/settle` 按月结算写入 `payroll_logs`
+  （财务净利润不再把课酬当 0 虚高），配套 /logs /void 与前端「确认结算 / 结算记录 / 作废」
+
+### 变更 Changed
+
+- 管理后台 Element Plus 改按需引入（自定义 unplugin 解析器绕开 barrel tree-shaking 陷阱）：
+  element-plus chunk 1060→584 kB、CSS 352→221 kB；xlsx 499 kB 改动态加载
+- 前端菜单过滤与路由守卫统一 `hasPageAccess` 判定；404 catch-all；
+  401 掉线带 `redirect` 回跳原页；登出清全部身份缓存
+- CI 纳入 `p2-fixes` 与全功能 256 项套件（CI 空库自动以 seed 夹具自举，
+  本地仍优先使用真实库快照）；根目录新增统一入口 `npm test`
+- `.env.example` 补 `PARENT_PHONE_LOGIN` / `STAFF_DEFAULT_PASSWORD` 说明
+
+### 移除 Removed
+
+- 旧代脚本 `start.sh` / `stop.sh`（由 `start-all.sh` / `stop-all.sh` 取代）、
+  CloudBase 遗物 `seed-data.js` / `init-cloud.js` / `deploy-functions.sh`
+- 根目录散落的 10 份 AUDIT/QA 历史报告移入 `docs/archive/`（本就不入库）
+
 
 <!--
 

@@ -30,8 +30,11 @@ jobs:
           node tests/audit-regression.cjs
           node tests/lead-suggestions-regression.cjs
           node tests/queue-regression.cjs
-      # 注：full-system.test.js（256 项）依赖开发者本地 data.db 快照中的真实身份，
-      # 作为本地门禁运行（npm run test:backend），不适合 CI 空库环境。
+          node tests/p2-fixes.test.js
+      - name: 全功能套件（256 项：CI 上自动以 seed 夹具自举隔离库）
+        working-directory: backend
+        # 本地有 db/data.db 快照时自动用快照；CI 空库则先 init+seed 出夹具再跑
+        run: node tests/full-system.test.js
 
   web-build:
     name: 管理后台构建（Node 20）

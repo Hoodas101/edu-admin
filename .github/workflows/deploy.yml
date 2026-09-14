@@ -40,9 +40,9 @@ on:
         default: false
         type: boolean
       seed_demo_data:
-        description: 灌入示例数据（管理员 13800000001 / 123456）
+        description: 灌入示例数据（管理员 13800000001 / 123456）——仅在空库时生效；已有生产数据的服务器重跑部署不会清库
         required: false
-        default: true
+        default: false
         type: boolean
 
 jobs:

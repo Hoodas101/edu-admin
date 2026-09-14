@@ -103,8 +103,19 @@ if [[ "$FRESH_DB" -eq 1 ]]; then
   docker compose exec -T app rm -f /data/data.db
 fi
 docker compose exec -T app node db/init.js
+# 安全守卫：只有空库才灌示例数据。重跑部署绝不覆盖已有生产数据。
+# seed.js 自身也是"先清 19 张表再写"的破坏性脚本，必须显式 --force 才执行。
 if [[ -z "${SKIP_SEED:-}" ]]; then
-  docker compose exec -T app node db/seed.js || echo "[db] seed 跳过或数据已存在"
+  # 注：不用 readonly 模式——WAL 未 checkpoint 时只读连接可能看不到最新数据（模拟验证过）；
+  # WAL 支持多连接并发，读一次 COUNT 与运行中的服务不冲突。
+  USER_COUNT="$(docker compose exec -T app node -e "const D=require('better-sqlite3');const p=process.env.DB_PATH||'/data/data.db';let n=0;try{n=new D(p).prepare('SELECT COUNT(*) c FROM users').get().c}catch(e){};console.log(n)" 2>/dev/null || echo 0)"
+  if [[ "${USER_COUNT:-0}" -gt 0 ]]; then
+    echo "[db] 检测到已有 ${USER_COUNT} 个账号 —— 跳过示例数据（重跑部署不会清库）"
+    echo "     如确需重置为演示数据：docker compose exec app node db/seed.js --force"
+  else
+    echo "[db] 空库，灌入示例数据…"
+    docker compose exec -T app node db/seed.js || echo "[db] seed 失败（不阻断部署）"
+  fi
 fi
 
 # ---- 健康检查 -----------------------------------------------------------------------

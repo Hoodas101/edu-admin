@@ -13,8 +13,12 @@ export DEBIAN_FRONTEND=noninteractive
 command -v git >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq git; }
 command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
 
+# 保留 .env（内含首次部署生成的随机 JWT_SECRET）：直接 rm -rf 重克隆会把它抹掉，
+# JWT_SECRET 一变，全员 token 立即失效（无提示集体掉线），且自定义配置全部丢失。
+if [[ -f /opt/edu-admin/.env ]]; then cp /opt/edu-admin/.env /tmp/edu-admin.env.bak; fi
 rm -rf /opt/edu-admin
 git clone --depth 1 "$REPO" /opt/edu-admin
 cd /opt/edu-admin
+if [[ -f /tmp/edu-admin.env.bak ]]; then mv /tmp/edu-admin.env.bak /opt/edu-admin/.env; echo "[remote] 已恢复原有 .env"; fi
 chmod +x deploy/deploy.sh
 SKIP_SEED="$SKIP_SEED" ./deploy/deploy.sh --host "$SERVER" $ARGS

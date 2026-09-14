@@ -27,17 +27,29 @@ const SRC_DB = path.join(__dirname, '..', 'db', 'data.db');
 const TEST_DB_DIR = '/tmp/edu-test';
 process.env.DB_PATH = path.join(TEST_DB_DIR, 'data.db');
 
-// 每次运行前从真实库快照复制一份干净的测试库（含 WAL 文件），保证确定性
+// 每次运行前从真实库快照复制一份干净的测试库（含 WAL 文件），保证确定性；
+// CI 上没有本地快照时，自举一个 seed 夹具库（空库 init + seed），配合下方动态身份解析，
+// 让 256 项套件同样能在 CI 空环境运行。
 fs.mkdirSync(TEST_DB_DIR, { recursive: true });
-for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
-  const src = path.join(__dirname, '..', 'db', f);
-  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(TEST_DB_DIR, f));
+const SNAPSHOT = fs.existsSync(SRC_DB) && process.env.FULLSYSTEM_FORCE_FIXTURE !== '1';
+if (SNAPSHOT) {
+  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
+    const src = path.join(__dirname, '..', 'db', f);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(TEST_DB_DIR, f));
+  }
+} else {
+  // 夹具库从零开始：清掉上次运行残留，避免旧快照混入
+  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
+    try { fs.unlinkSync(path.join(TEST_DB_DIR, f)); } catch (e) { /* 不存在则忽略 */ }
+  }
+  // 自举夹具：db/index.js 会自动建表 + 跑迁移，然后灌入种子数据（同进程单连接）
+  require('../db/seed')();
 }
 
 const BASE = `http://localhost:${process.env.PORT}`;
 const { generateToken } = require('../utils');
 
-// ---- 真实种子身份（来自真实库快照）----
+// ---- 种子身份（默认来自真实库快照；CI 夹具库在服务器启动后动态解析）----
 const IDS = {
   admin: 'phone_13800000001',
   coach: 'phone_13800000011',
@@ -179,6 +191,14 @@ async function main() {
   // token_version 吊销校验：自签 Token 需携带与库中一致的 tv（服务器启动时已跑迁移 012）
   const Database = require('better-sqlite3');
   const tvdb = new Database(process.env.DB_PATH);
+  // 夹具库（CI 自举 seed）的身份 openid 是 wx_ 前缀而非 phone_ 前缀：无快照时按角色动态解析；
+  // 有本地快照时保持上方硬编码身份（历史行为不变，且 coach 权限集已按快照配置）
+  if (!SNAPSHOT) {
+    for (const role of ['admin', 'coach', 'sales']) {
+      const row = tvdb.prepare("SELECT openid FROM users WHERE role = ? AND status = 'active' ORDER BY created_at LIMIT 1").get(role);
+      if (row) IDS[role] = row.openid;
+    }
+  }
   const tvOf = (openid) => (tvdb.prepare('SELECT token_version FROM users WHERE openid = ?').get(openid) || {}).token_version || 0;
   const tokens = {
     admin: generateToken({ openid: IDS.admin, role: 'admin', tv: tvOf(IDS.admin) }),
@@ -464,7 +484,10 @@ async function main() {
   }
   if (parentToken && bound) {
     const qdb = new Database(process.env.DB_PATH, { readonly: true });
-    const other = qdb.prepare('SELECT student_id FROM parent_bindings WHERE parent_openid <> ? LIMIT 1').get(bound.parent_openid);
+    // 必须选「该家长未绑定」的学员：同班/同孩双家长场景下 <>parent 不够（父母都绑同一学员）
+    const other = qdb.prepare(
+      'SELECT student_id FROM parent_bindings WHERE parent_openid <> ? AND student_id NOT IN (SELECT student_id FROM parent_bindings WHERE parent_openid = ?) LIMIT 1'
+    ).get(bound.parent_openid, bound.parent_openid);
     qdb.close();
     if (other) {
       const r = await call('GET', `/api/attendances/student/${other.student_id}`, { token: parentToken });
