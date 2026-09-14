@@ -53,13 +53,21 @@
 
 ### 修复 Fixed
 
+- 财务口径统一：summary/monthly/by-product/by-sales 收入均改计 `status IN ('paid','refunded')`
+  且排除 `order_type='refund'` 流水行 —— 修复全额退款订单（status 翻转）收入消失、
+  退款照扣导致的净收入双扣为负，以及两套报表互相矛盾；新增离线回归套件
+  `tests/finance-refund-regression.cjs`（21 项，入 npm test 与 CI）
+- 退卡金额：按订单实付/原价比例折减整单折扣（原按标价退对折扣单超退），
+  并加「订单剩余额退度」硬上限（payable − 已退），与订单退款路径口径一致；
+  RFND 流水 order_no 补随机后缀（同毫秒连退两卡撞 UNIQUE 约束实测）
 - 资金正确性：退卡按 `unitPrice` 找价（原按 `price` 永不命中导致超退）、
   退款金额上限与 refund_rules 复算、取消订单多步回滚入事务、会员编号漂移修复
 - 一致性：课时/积分/扣卡/分班等 12 处读改写补事务边界；备份目录跟随 `DB_PATH`
   （Docker 卷内不再落可写层丢失）；health 加 `SELECT 1` 真实探测；
   微信支付未配置时诚实失败而非假成功；`allow_self_booking` 开关落地
 - 薪资：新增 `POST /api/payroll/settle` 按月结算写入 `payroll_logs`
-  （财务净利润不再把课酬当 0 虚高），配套 /logs /void 与前端「确认结算 / 结算记录 / 作废」
+  （财务净利润不再把课酬当 0 虚高），配套 /logs /void 与前端「确认结算 / 结算记录 / 作废」；
+  结算确认弹窗人数改按「金额 > 0 的教练」计（与后端跳过 0 元记录的口径一致，不再虚报）
 
 ### 变更 Changed
 
@@ -67,8 +75,8 @@
   element-plus chunk 1060→584 kB、CSS 352→221 kB；xlsx 499 kB 改动态加载
 - 前端菜单过滤与路由守卫统一 `hasPageAccess` 判定；404 catch-all；
   401 掉线带 `redirect` 回跳原页；登出清全部身份缓存
-- CI 纳入 `p2-fixes` 与全功能 256 项套件（CI 空库自动以 seed 夹具自举，
-  本地仍优先使用真实库快照）；根目录新增统一入口 `npm test`
+- CI 纳入 `p2-fixes` / `finance-refund-regression` 与全功能 256 项套件（共 6 个专项套件；
+  CI 空库自动以 seed 夹具自举，本地仍优先使用真实库快照）；根目录新增统一入口 `npm test`
 - `.env.example` 补 `PARENT_PHONE_LOGIN` / `STAFF_DEFAULT_PASSWORD` 说明
 
 ### 移除 Removed

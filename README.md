@@ -55,9 +55,9 @@ cd edu-admin
 bash deploy.sh        # 一键部署 / 重新部署（已有数据不会被动）
 bash start-all.sh     # 日常启动（依赖/构建产物已就绪时更快）
 bash stop-all.sh      # 停止服务
-npm test              # 全部后端回归（5 个专项套件 + 256 项全功能，隔离测试库）
+npm test              # 全部后端回归（6 个专项套件 + 256 项全功能，隔离测试库）
 npm run smoke         # 冒烟测试（39 项，需服务运行中）
-npm run test:backend  # 仅全功能套件（256 项）
+npm run test:backend  # 仅全功能套件（257 项 = 256 断言 + 1 预期 WARN，隔离库自动快照/夹具两模式）
 npm run verify        # 扩展验收套件（约 20 套件，需服务运行中，见 TEST-GUIDE.md）
 ```
 

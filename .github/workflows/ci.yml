@@ -31,6 +31,7 @@ jobs:
           node tests/lead-suggestions-regression.cjs
           node tests/queue-regression.cjs
           node tests/p2-fixes.test.js
+          node tests/finance-refund-regression.cjs
       - name: 全功能套件（256 项：CI 上自动以 seed 夹具自举隔离库）
         working-directory: backend
         # 本地有 db/data.db 快照时自动用快照；CI 空库则先 init+seed 出夹具再跑

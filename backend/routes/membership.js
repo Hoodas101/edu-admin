@@ -9,6 +9,7 @@
  */
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt } = require('../utils');
 
@@ -471,10 +472,14 @@ router.post('/refund', (req, res) => {
       // 取得该卡的实际成交价（优先取购卡订单实付，避免按卡类型原价退款造成多退/少退）
       let paidPrice = 0;
       let orderId = null;
+      let orderPayable = 0;
+      let orderRefundedSoFar = 0;
       if (card.order_id) {
         orderId = card.order_id;
-        const order = db.prepare('SELECT items, payable_amount FROM orders WHERE id = ?').get(card.order_id);
+        const order = db.prepare('SELECT items, total_amount, payable_amount, refunded_amount FROM orders WHERE id = ?').get(card.order_id);
         if (order) {
+          orderPayable = Number(order.payable_amount) || 0;
+          orderRefundedSoFar = Number(order.refunded_amount) || 0;
           try {
             const items = JSON.parse(order.items || '[]');
             // 必须精确匹配本卡商品：旧逻辑回退 items[0] 会把别的热价格算到本卡头上；
@@ -485,12 +490,20 @@ router.post('/refund', (req, res) => {
               const qty = Number(it.quantity) || 1;
               const unit = Number(it.unitPrice ?? it.price) || 0;
               const total = Number(it.totalPrice) || 0;
-              if (unit > 0) paidPrice = unit * qty;
-              else if (total > 0) paidPrice = total;
+              let base = 0;
+              if (unit > 0) base = unit * qty;
+              else if (total > 0) base = total;
+              if (base > 0) {
+                // 按订单实付/原价比例折减：整单有折扣时按标价退会超退
+                const orderTotal = Number(order.total_amount) || 0;
+                paidPrice = (orderTotal > 0 && orderPayable > 0 && orderPayable < orderTotal)
+                  ? Math.round(base * orderPayable / orderTotal)
+                  : base;
+              }
             }
             // 单明细订单可安全回退整单实付
-            if (!paidPrice && items.length === 1 && Number(order.payable_amount) > 0) {
-              paidPrice = Number(order.payable_amount);
+            if (!paidPrice && items.length === 1 && orderPayable > 0) {
+              paidPrice = orderPayable;
             }
           } catch (e) { /* 忽略损坏数据 */ }
         }
@@ -510,6 +523,12 @@ router.post('/refund', (req, res) => {
         const totalMs = ((card.expires_at || 0) - (card.pause_total_ms || 0)) - (card.activated_at || 0);
         const remainMs = Math.max(0, (card.expires_at || 0) - currentTime);
         refundAmount = totalMs > 0 && paidPrice > 0 ? Math.max(0, Math.round(paidPrice * remainMs / totalMs)) : 0;
+      }
+      // 硬上限：不得超过该订单剩余额退额度（payable − 已退），与 orders/refund 的
+      // 「累计退款不能超过订单金额」口径一致。RFND 流水行按本值入账，不会超过原单可退额。
+      if (orderId && orderPayable > 0) {
+        const room = Math.max(0, orderPayable - orderRefundedSoFar);
+        if (refundAmount > room) refundAmount = room;
       }
 
       // 更新卡状态
@@ -545,7 +564,8 @@ router.post('/refund', (req, res) => {
 
       // 创建退款订单
       const refundOrderId = generateId('RFND');
-      const orderNo = `RF${Date.now()}`;
+      // order_no 有 UNIQUE 约束：同一毫秒内连续退卡/同事务重试时纯时间戳必撞（回归测试实测）
+      const orderNo = `RF${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
       db.prepare(`
         INSERT INTO orders (id, order_no, student_id, student_name, order_type, items, total_amount, payable_amount, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'refund', ?, ?, ?, 'refunded', ?, ?)

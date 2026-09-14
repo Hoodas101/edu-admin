@@ -45,22 +45,24 @@ router.get('/summary', (req, res) => {
       end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999).getTime();
     }
 
-    // 已支付订单
+    // 收入口径含 status IN ('paid','refunded')：订单退完会把 status 翻转为 refunded，
+    // 若只认 paid，全额退款订单的收入从 gross 消失、refunded_amount 又照减 → net 双扣为负。
+    // 已支付订单（含已全额退款的，其退款在下方统一冲减）
     const paidOrders = db.prepare(`
-      SELECT COUNT(*) as order_count,
+      SELECT COUNT(CASE WHEN status = 'paid' THEN 1 END) as order_count,
              COALESCE(SUM(payable_amount), 0) as total_revenue,
              COALESCE(SUM(discount_amount), 0) as total_discount,
              COALESCE(SUM(refunded_amount), 0) as total_refunded
       FROM orders
-      WHERE status = 'paid' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
     `).get(start, end);
 
-    // 退款总额
+    // 退款总额（与收入同一行集合：paid 的部分退 + refunded 的全额退，避免跨口径双扣）
     const refunded = db.prepare(`
       SELECT COUNT(*) as refund_count,
              COALESCE(SUM(refunded_amount), 0) as refund_amount
       FROM orders
-      WHERE refunded_amount > 0 AND updated_at >= ? AND updated_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0 AND updated_at >= ? AND updated_at <= ?
     `).get(start, end);
 
     // 按订单类型分组
@@ -70,7 +72,7 @@ router.get('/summary', (req, res) => {
              COALESCE(SUM(payable_amount), 0) as revenue,
              COALESCE(SUM(refunded_amount), 0) as refunded
       FROM orders
-      WHERE status = 'paid' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
       GROUP BY order_type
     `).all(start, end);
 
@@ -147,15 +149,17 @@ router.get('/monthly', (req, res) => {
     const startMs = new Date(year, 0, 1).getTime();
     const endMs = new Date(year, 11, 31, 23, 59, 59, 999).getTime();
 
+    // 与 summary 同口径：含已全额退款（status='refunded'）订单，其 refunded_amount 在同月冲减，
+    // 否则出现「summary 扣了、monthly 没扣」的跨报表矛盾。RFND 退款流水行 paid_at 为 NULL 天然不入此表。
     const months = db.prepare(`
       SELECT
         strftime('%m', datetime(paid_at/1000, 'unixepoch', 'localtime')) as month,
-        COUNT(*) as order_count,
+        COUNT(CASE WHEN status = 'paid' THEN 1 END) as order_count,
         COALESCE(SUM(payable_amount), 0) as revenue,
         COALESCE(SUM(discount_amount), 0) as discount,
         COALESCE(SUM(refunded_amount), 0) as refunded
       FROM orders
-      WHERE status = 'paid' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
       GROUP BY month
       ORDER BY month
     `).all(startMs, endMs);
@@ -240,7 +244,7 @@ router.get('/by-product', (req, res) => {
         refunded_amount,
         order_type
       FROM orders
-      WHERE status = 'paid' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
     `).all(start, end);
 
     // 解析订单项目，按产品名聚合；收入按订单实付(payable_amount)分摊，退款按订单行比例分摊
@@ -321,7 +325,7 @@ router.get('/by-sales', (req, res) => {
         COALESCE(SUM(refunded_amount), 0) as refunded,
         COALESCE(SUM(CASE WHEN is_1v1 = 1 THEN 1 ELSE 0 END), 0) as vip_count
       FROM orders
-      WHERE status = 'paid' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
       GROUP BY salesperson
       ORDER BY revenue DESC
     `).all(start, end);

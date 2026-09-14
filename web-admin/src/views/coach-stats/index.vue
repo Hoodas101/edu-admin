@@ -393,10 +393,16 @@ const loadLogs = async () => {
   }
 }
 
+const settleCount = computed(() => settlement.value.filter((r) => (r.amount || 0) > 0).length)
+
 const settleNow = async () => {
+  if (!settleCount.value) {
+    ElMessage.warning('本月暂无应付课酬（金额为 0 的教练不会被结算）')
+    return
+  }
   try {
     await ElMessageBox.confirm(
-      `确认结算 ${monthLabel.value} 全部${t('instructor')}课时费（${settlement.value.length} 位 · 合计 ¥${totalAmount.value.toLocaleString()}）？结算后课酬将计入财务报表净利润，如需重算需先作废本月结算记录。`,
+      `确认结算 ${monthLabel.value} 全部${t('instructor')}课时费（${settleCount.value} 位 · 合计 ¥${totalAmount.value.toLocaleString()}）？结算后课酬将计入财务报表净利润，如需重算需先作废本月结算记录。`,
       '确认薪资结算',
       { type: 'warning', confirmButtonText: '确认结算', cancelButtonText: '取消' }
     )
