@@ -62,6 +62,8 @@ try {
     userInfo.value = {}
     localStorage.removeItem('edu_token')
     localStorage.removeItem('edu_user_info')
+    // 机构称呼方案缓存一并清除：共享电脑下一位登录者不应看到上一机构的术语
+    localStorage.removeItem('edu_settings')
   }
 
   // 获取用户信息

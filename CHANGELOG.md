@@ -16,7 +16,8 @@
 - `tools/dark-mode-audit.mjs`：像素级深浅色双模式审计（--theme dark|light）
 - Docker 一键部署：单镜像（API + 管理后台）、compose 编排、
   Caddy 自动 HTTPS 边车、`deploy/deploy.sh` 与 GitHub Actions Deploy 工作流
-- CI（GitHub Actions）：后端 256 项回归 × Node 18/20/22、
+- CI（GitHub Actions）：后端 4 个专项套件 × Node 18/20/22（256 项全量回归
+  为本地门禁 `npm run test:backend`）、
   管理端构建、镜像构建冒烟、敏感信息与运行数据门禁
 - 社区文档：贡献指南、安全策略、行为准则
 - 微信小程序三端（家长 / 教练 / 管理员，41 页原生实现）
@@ -29,7 +30,115 @@
 - 一键部署 `deploy.sh`（免 Docker 原生路径）+ 全中文文档
   （README / 使用手册 / 部署上线说明 / 常见问题 FAQ / TEST-GUIDE）
 - 可定制机构称呼（老师/学员/会员全站替换），全部业务规则可配置
-- 生产模式强制 `JWT_SECRET`，未配置拒绝启动；每日自动备份 + Web 一键导出
+- JWT 安全：未配置 `JWT_SECRET` 时首次启动自动生成强随机密钥并持久化
+  （`backend/db/.jwt-secret`，随数据库备份），绝不使用硬编码默认值；
+  每日自动备份 + Web 一键导出
+
+## [1.0.1] - 2026-09-15
+
+多视角深度审计（机构管理者 / 教练 / 销售 / 家长 / 工程师 / 设计师）后的四批修复，
+以及两轮对抗性复审（pass 6 / pass 7）的追加修复。
+
+### 安全 Security
+
+- 家长手机号免密登录改为环境变量开关 `PARENT_PHONE_LOGIN`（生产默认关闭），
+  堵住账号接管面；微信一键登录路径不受影响
+- JWT 增加 `token_version` 吊销链：停用 / 改密 / 角色变更 / 删除员工即时作废旧 Token
+  （全员需重新登录一次，为本次安全升级的预期代价）
+- 签到套利修复：家长扫码补报名校验、次数卡扣课、QR nonce 验证
+- 越权修复：排期 PUT 归属校验、他人学员名册裁剪、/charts 权限、微信支付订单归属、
+  `INSERT OR REPLACE` 覆盖支付记录去除
+- 部署安全：seed 三重守卫（`seed.js` 非空库需 `--force`、`deploy/deploy.sh` 检测
+  有数据即跳过、Deploy 工作流 `seed_demo_data` 默认 false）——重跑部署不再清空生产库；
+  `remote-deploy.sh` 保留 `.env`（JWT_SECRET 不再随重部署重置全员掉线）
+
+### 修复 Fixed
+
+- 财务口径统一：summary/monthly/by-product/by-sales 收入均改计 `status IN ('paid','refunded')`
+  且排除 `order_type='refund'` 流水行 —— 修复全额退款订单（status 翻转）收入消失、
+  退款照扣导致的净收入双扣为负，以及两套报表互相矛盾；新增离线回归套件
+  `tests/finance-refund-regression.cjs`（21 项，入 npm test 与 CI）
+- 退卡金额：按订单实付/原价比例折减整单折扣（原按标价退对折扣单超退），
+  并加「订单剩余额退度」硬上限（payable − 已退），与订单退款路径口径一致；
+  RFND 流水 order_no 补随机后缀（同毫秒连退两卡撞 UNIQUE 约束实测）
+- 资金正确性：退卡按 `unitPrice` 找价（原按 `price` 永不命中导致超退）、
+  退款金额上限与 refund_rules 复算、取消订单多步回滚入事务、会员编号漂移修复
+- 一致性：课时/积分/扣卡/分班等 12 处读改写补事务边界；备份目录跟随 `DB_PATH`
+  （Docker 卷内不再落可写层丢失）；health 加 `SELECT 1` 真实探测；
+  微信支付未配置时诚实失败而非假成功；`allow_self_booking` 开关落地
+- 薪资：新增 `POST /api/payroll/settle` 按月结算写入 `payroll_logs`
+  （财务净利润不再把课酬当 0 虚高），配套 /logs /void 与前端「确认结算 / 结算记录 / 作废」；
+  结算确认弹窗人数改按「金额 > 0 的教练」计（与后端跳过 0 元记录的口径一致，不再虚报）
+- 薪资结算流程可懂性：作废弹窗提示「该月剩余 N 条需全部作废方可重算」；月份列与页内
+  其它区域统一「2026年09月」格式；已作废记录结算时间显示「—」不再回落创建时间；
+  「净利润虚高」警示从灰色小字升级为独立 warning 提示条
+- 登录/掉线边角：`/login?redirect=/login` 不再停在登录页；并发 401 只提示跳转一次；
+  重登跳到无权限页时给出明确 toast（不再静默弹回让人以为页面坏了）
+- CI 阻断修复：`p2-fixes` 套件补 seed 夹具自举双模式（旧版 CI 空库下身份解析不到，
+  403 + 外键崩溃三矩阵全红，对抗审查在干净 worktree 实测复现）
+- 部署加固：`--fresh-db` 连 `-wal/-shm` 一起删（防旧数据经 WAL 回灌致守卫误判跳过 seed）；
+  `remote-deploy.sh` 的 .env 备份改 mktemp 随机路径 + 0600 权限 + trap 兜底恢复；
+  Deploy 工作流完成通知不再无条件展示示例账号（存量库沿用原账号）；
+  `seed.js` 头注释与守卫行为对账；CHANGELOG「移除」段改写为如实描述（本地清理非仓库删除）
+
+### 安全 Security（第二轮复审追加）
+
+- JWT 吊销链补洞：`token_version` 校验旧版 `u &&` 短路，users 行不存在
+  （openid 已轮换 / 账号已删除）时放行无主 Token，冻结角色最长存活 7 天——
+  现行不存在同样返回 401 强制重登
+- `deploy.sh` 原生部署路径显式以 `NODE_ENV=production` 启动后端：
+  此前不设环境变量直接 `node server.js`，会使「生产默认关闭」的
+  `PARENT_PHONE_LOGIN` 免密开关在生产机实际处于开启状态；
+  同时修正 JWT_SECRET 提示与真实行为（自动生成持久化密钥）不一致的旧文案
+- 登录回跳同源校验加固：`/\evil.com` 形式（WHATWG 反斜杠归一）不再作为 redirect 通过
+
+### 修复 Fixed（第二轮复审追加）
+
+- 退款 + 耗课双拿：按退费规则建议值的「部分退款」退还的现金正是卡内未用权益的对价，
+  此前退完钱课时/有效期照常可用——现同步回收（次数卡清零 remaining_classes、
+  时效卡清零剩余有效期），成功提示告知回收内容；
+  协商自定义金额与比例手续费模式视为机构自愿让利，不动权益
+- 薪资月中结算口径：`/coaches` 预览与 `/settle` 结算均剔除未来日期的 scheduled 课节
+  （fixed 规则下未上课程也按 baseRate 计酬，整月范围会提前透支应付课酬），
+  结算响应回显实际计酬截止日，前端提示「月底后可作废重算补入剩余课程」
+- 资金写入留痕：订单退款 / 已支付订单取消 / 薪资结算 / 结算作废四类资金操作补
+  `audit_log` 记录（金额、是否按规则建议值、权益回收、操作人），事后可追责
+- 删除活动级联清理：签到奖励积分流水为 `type='checkin'`（非 'earn'），
+  旧版只回滚 earn——签到分随流水被删、学员余额却不清，账实不符；
+  现按被删流水净额（含撤销负向行）统一回滚 earn/checkin
+- 管理端两处按需引入下的运行时坏引用：签到页缺席状态 `Close` 图标缺失导入（图标空白），
+  系统设置恢复数据 `on-exceed` 处理器在模板内联引用 `ElMessage`（编译成 `_ctx.ElMessage`
+  运行时 undefined，触发即抛错）——均改由 script 显式导入/声明
+- 薪资结算页「本月已结算」判定改按月份专用查询，不再受结算记录列表 200 条窗口
+  限制（记录变多后误判未结算、重复点击被后端拒绝的困惑消除）
+
+### 测试与变更（第二轮复审追加）
+
+- 新增离线回归套件 `tests/review2-regression.cjs`（30 项）：部分退款权益回收与协商
+  金额豁免、月中结算未来课节剔除、settle/void 审计留痕、活动删除积分净额回滚，
+  已并入 `npm test` 与 CI 门禁
+- 家长扫码签到 QR 一次性 nonce（审计建议项）经评估不实现：身份源于 JWT、
+  绑定 + 报名 + 时间窗口 + 唯一考勤四重约束下转发二维码无利可图，
+  一次性码只会误伤弱网家长——决策以代码注释留档
+- 版本号统一升至 **1.0.1**（根 / backend / web-admin package.json）
+
+### 变更 Changed
+
+- 管理后台 Element Plus 改按需引入（自定义 unplugin 解析器绕开 barrel tree-shaking 陷阱）：
+  element-plus chunk 1060→584 kB、CSS 352→221 kB；xlsx 499 kB 改动态加载
+- 前端菜单过滤与路由守卫统一 `hasPageAccess` 判定；404 catch-all；
+  401 掉线带 `redirect` 回跳原页；登出清全部身份缓存
+- CI 纳入 `p2-fixes` / `finance-refund-regression` 与全功能 256 项套件（专项套件扩至 7 个；
+  CI 空库自动以 seed 夹具自举，本地仍优先使用真实库快照）；根目录新增统一入口 `npm test`
+- `.env.example` 补 `PARENT_PHONE_LOGIN` / `STAFF_DEFAULT_PASSWORD` 说明
+
+### 移除 Removed
+
+- 本地工作区清理（下列文件本就未被 git 跟踪，仓库无对应删除记录）：
+  旧代脚本 `start.sh` / `stop.sh`（由 `start-all.sh` / `stop-all.sh` 取代）、
+  CloudBase 遗物 `seed-data.js` / `init-cloud.js` / `deploy-functions.sh` 从开发机移除；
+  根目录散落的 10 份 AUDIT/QA 历史报告移入 `docs/archive/`（`.gitignore` 覆盖）
+
 
 <!--
 

@@ -62,7 +62,8 @@ async function apiTests() {
   }).then((r) => r.json());
   if (login.code !== 0) throw new Error('管理员登录失败: ' + JSON.stringify(login));
   openid = login.data.openid;
-  const H = { 'x-openid': openid, 'content-type': 'application/json' };
+  // 后端已不信任 x-openid 头（身份只认 JWT），改用 Authorization 携带 token
+  const H = { 'content-type': 'application/json', Authorization: 'Bearer ' + login.data.token };
 
   const now = new Date();
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;

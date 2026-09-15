@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
 const bodyParser = require('body-parser');
-const { success, fail, safeFail, getOpenId, now, isAdminReq } = require('../utils');
+const { success, fail, safeFail, getOpenId, now, isAdminReq, isStaffReq } = require('../utils');
 const { getBackupConfig, createBackup, listBackups, deleteBackup, BACKUP_DIR } = require('../utils/backup');
 const { getModulesMeta, exportData, importData } = require('../utils/dataio');
 const termsUtil = require('../utils/terms');
@@ -114,9 +114,13 @@ const DEFAULT_REFUND_RULES = {
 
 /**
  * GET /api/settings
+ * 非员工（未登录、或家长 token）只返回公开展示子集：
+ * 称呼方案 + 机构展示信息（名称/Logo/客服电话）。
+ * 积分/退费/请假/推送规则、表格列配置属经营数据，仅员工（管理员/教练/销售）可见。
  */
 router.get('/', (req, res) => {
   try {
+    const isPublicReq = !isStaffReq(req);
     const rows = db.prepare('SELECT key, value FROM settings').all();
     const raw = {};
     rows.forEach((r) => { raw[r.key] = r.value; });
@@ -156,6 +160,16 @@ router.get('/', (req, res) => {
       if (key === 'term_overrides') {
         result[key] = (result[key] && typeof result[key] === 'object') ? result[key] : {};
       }
+    }
+    if (isPublicReq) {
+      // 未登录只回公开展示子集，其余键（规则/列配置）置 null 不泄露
+      const org = result.org_info && typeof result.org_info === 'object' ? result.org_info : {};
+      return res.json(success({
+        org_info: { name: org.name || '', logo: org.logo || '' },
+        service_phone: result.service_phone || '',
+        term_scheme: result.term_scheme,
+        term_overrides: result.term_overrides,
+      }));
     }
     res.json(success(result));
   } catch (err) {
@@ -290,7 +304,7 @@ router.post('/db-restore', rawUpload, async (req, res) => {
       probe.close();
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch (_) {}
-      return res.status(400).json(fail('备份文件已损坏或无法打开：' + e.message));
+      return res.status(400).json(fail('备份文件已损坏或无法打开'));
     }
     // 3) 恢复前自动备份当前库（安全网）
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -337,13 +351,14 @@ router.post('/db-restore', rawUpload, async (req, res) => {
       try { db.exec('DETACH DATABASE src'); } catch (_) {}
       db.pragma('foreign_keys = ON');
       try { fs.unlinkSync(tmp); } catch (_) {}
-      return res.status(500).json(fail('恢复过程中出错，已中止：' + e.message));
+      return res.status(500).json(safeFail('恢复过程中出错，已中止'));
     }
     try { fs.unlinkSync(tmp); } catch (_) {}
     res.json(success({ summary, safetyBackup: safetyName }));
   } catch (err) {
     console.error('[db-restore]', err);
-    res.status(500).json(safeFail('恢复失败：' + err.message));
+    // 详细错误只进日志：err.message 可能携带文件路径/SQL 细节
+    res.status(500).json(safeFail('恢复失败，请查看服务端日志'));
   }
 });
 
@@ -389,7 +404,7 @@ router.delete('/backups/:filename', (req, res) => {
     const result = deleteBackup(req.params.filename);
     res.json(success({ deleted: true, filename: req.params.filename }));
   } catch (err) {
-    res.json(fail(err.message || '删除失败'));
+    res.json(fail('删除失败，请查看服务端日志'));
   }
 });
 

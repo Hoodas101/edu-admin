@@ -16,6 +16,9 @@ const { generateId, success, fail, safeFail, getOpenId, now, isStaffReq } = requ
 const trialPhoneLimits = new Map();
 const TRIAL_LIMIT_WINDOW = 60 * 60 * 1000;
 const TRIAL_LIMIT_MAX = 5;
+// IP 维度频控：手机号频控可被「每次换一个合法手机号」绕过，按来源 IP 独立限
+const trialIpLimits = new Map();
+const TRIAL_IP_LIMIT_MAX = 15;
 
 // 建表（幂等）
 db.exec(`
@@ -69,6 +72,18 @@ router.post('/apply', (req, res) => {
     }
     rec.count += 1;
     if (rec.count > TRIAL_LIMIT_MAX) {
+      return res.json(fail('操作过于频繁，请稍后再试'));
+    }
+
+    // IP 维度频控：堵死「每次换一个合法手机号」绕过手机号频控刷线索表的路径
+    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    let ipRec = trialIpLimits.get(ip);
+    if (!ipRec || nowMs - ipRec.firstAt > TRIAL_LIMIT_WINDOW) {
+      ipRec = { firstAt: nowMs, count: 0 };
+      trialIpLimits.set(ip, ipRec);
+    }
+    ipRec.count += 1;
+    if (ipRec.count > TRIAL_IP_LIMIT_MAX) {
       return res.json(fail('操作过于频繁，请稍后再试'));
     }
 
@@ -216,6 +231,9 @@ function cleanupTrialPhoneLimits() {
   const nowMs = Date.now();
   for (const [phone, rec] of trialPhoneLimits) {
     if (!rec || nowMs - rec.firstAt > TRIAL_LIMIT_WINDOW) trialPhoneLimits.delete(phone);
+  }
+  for (const [ip, rec] of trialIpLimits) {
+    if (!rec || nowMs - rec.firstAt > TRIAL_LIMIT_WINDOW) trialIpLimits.delete(ip);
   }
 }
 

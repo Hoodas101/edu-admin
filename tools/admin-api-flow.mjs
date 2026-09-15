@@ -26,12 +26,15 @@ async function step(name, fn) {
 }
 
 let openid = '';
+let adminToken = '';
 await step('管理员登录（手机+密码+角色）', async () => {
   const r = await j('/auth/login', { method: 'POST', body: JSON.stringify({ phone: '13800000001', role: 'admin', password: '123456', nickname: '管理员' }) });
   if (r.body.code !== 0) throw new Error(JSON.stringify(r.body));
   openid = r.body.data.openid;
+  adminToken = r.body.data.token;
 });
-const H = { 'x-openid': openid };
+// 后端已不再信任 x-openid 头（身份只认 JWT），改用 Authorization 携带 token
+const H = { Authorization: `Bearer ${adminToken}` };
 
 await step('管理员可访问 /api/admin/courses', async () => {
   const r = await j('/admin/courses', { headers: H });
@@ -116,7 +119,7 @@ let leaveId = '', fbId = '', leaveSchedId = '';
 await step('家长提交请假申请（新建排课）', async () => {
   const pj = await j('/auth/login', { method: 'POST', body: JSON.stringify({ phone: '13900000001', role: 'parent', nickname: '小明爸爸' }) });
   if (pj.body.code !== 0) throw new Error(JSON.stringify(pj.body));
-  const parentOid = pj.body.data.openid;
+  const parentAuth = { Authorization: 'Bearer ' + pj.body.data.token };
   const d = new Date(Date.now() + 86400000);
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   // 先新建一条独立排课（避开种子数据中已有的请假记录）
@@ -128,7 +131,7 @@ await step('家长提交请假申请（新建排课）', async () => {
   });
   if (schedCreate.body.code !== 0) throw new Error(JSON.stringify(schedCreate.body));
   leaveSchedId = schedCreate.body.data.id;
-  const r = await j('/leave/apply', { method: 'POST', headers: { 'x-openid': parentOid }, body: JSON.stringify({ scheduleId: leaveSchedId, reason: '小程序管理端测试请假' }) });
+  const r = await j('/leave/apply', { method: 'POST', headers: parentAuth, body: JSON.stringify({ scheduleId: leaveSchedId, reason: '小程序管理端测试请假' }) });
   if (r.body.code !== 0) throw new Error(JSON.stringify(r.body));
   leaveId = r.body.data.id;
 });
@@ -149,8 +152,8 @@ await step('请假状态已更新为 approved', async () => {
 // ===== 反馈处理流 =====
 await step('家长提交意见反馈', async () => {
   const pj = await j('/auth/login', { method: 'POST', body: JSON.stringify({ phone: '13900000001', role: 'parent' }) });
-  const parentOid = pj.body.data.openid;
-  const r = await j('/feedback/apply', { method: 'POST', headers: { 'x-openid': parentOid }, body: JSON.stringify({ content: '小程序管理端测试反馈', contact: '13900000001' }) });
+  const parentAuth = { Authorization: 'Bearer ' + pj.body.data.token };
+  const r = await j('/feedback/apply', { method: 'POST', headers: parentAuth, body: JSON.stringify({ content: '小程序管理端测试反馈', contact: '13900000001' }) });
   if (r.body.code !== 0) throw new Error(JSON.stringify(r.body));
   fbId = r.body.data.id;
 });
@@ -224,8 +227,8 @@ await step('签到点名（建课→报名→点名→考勤记录）', async ()
   attSchedId = sc.body.data.id;
   // 家长报名
   const pj = await j('/auth/login', { method: 'POST', body: JSON.stringify({ phone: '13900000001', role: 'parent' }) });
-  const parentOid = pj.body.data.openid;
-  const enroll = await j('/schedules/' + attSchedId + '/enroll', { method: 'POST', headers: { 'x-openid': parentOid }, body: JSON.stringify({}) });
+  const parentAuth = { Authorization: 'Bearer ' + pj.body.data.token };
+  const enroll = await j('/schedules/' + attSchedId + '/enroll', { method: 'POST', headers: parentAuth, body: JSON.stringify({}) });
   if (enroll.body.code !== 0) throw new Error('报名失败: ' + JSON.stringify(enroll.body));
   // 取报名学生
   const det = await j('/schedules/' + attSchedId, { headers: H });

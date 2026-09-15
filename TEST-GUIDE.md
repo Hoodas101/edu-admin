@@ -63,7 +63,7 @@ node tools/dark-mode-audit.mjs --theme light     # 预期：亮色像素占比�
 
 | 现象 | 处理 |
 |------|------|
-| 登录提示频繁 | 登录限流 100 次/15 分钟、全局限流 200 次/分钟，重启后端即复位 |
+| 登录提示频繁 | 登录限流 100 次/15 分钟、全局限流 600 次/分钟，重启后端即复位 |
 | 数据混乱想重置 | 删除 `backend/db/data.db*`，重新 `node backend/db/init.js && node backend/db/seed.js` |
 | 依赖安装失败 | `better-sqlite3` 需编译环境：macOS 装 Xcode CLT（`xcode-select --install`），Linux 装 `build-essential python3` |
 

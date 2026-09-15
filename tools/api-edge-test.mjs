@@ -53,7 +53,11 @@ const pt = p.body.data.token
 r = await raw('/admin/dashboard', { token: pt })
 assert('家长访问看板被拒', r.status === 403 || r.body.code !== 0, `status=${r.status}`)
 r = await raw('/settings', { token: pt })
-assert('家长访问设置被拒', r.status === 403 || r.body.code !== 0, `status=${r.status}`)
+// 设计契约：GET /settings 对非员工（含家长）返回公开展示子集（200），敏感键不下发
+assert('家长访问设置仅得公开子集', r.status === 200 && r.body.code === 0
+  && r.body.data.points_rules == null && r.body.data.notification_rules == null
+  && r.body.data.students_columns == null && r.body.data.orders_columns == null,
+  `status=${r.status} keys=${Object.keys(r.body.data || {}).join(',')}`)
 r = await raw('/growth/leads', { token: pt })
 assert('家长访问线索被拒', r.status === 403 || r.body.code !== 0, `status=${r.status}`)
 r = await raw('/orders', { token: pt, m: 'POST', b: { studentId: 'stu_001', cardTypeId: 'ct_001' } })

@@ -5,7 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, escapeLike } = require('../utils');
 const leadSuggestions = require('../utils/lead-suggestions');
 
 function isAdminReq(req) {
@@ -115,7 +115,7 @@ router.get('/leads', (req, res) => {
 
     let where = 'WHERE 1=1';
     const params = [];
-    if (keyword) { where += ' AND (name LIKE ? OR phone LIKE ?)'; params.push(`%${keyword}%`, `%${keyword}%`); }
+    if (keyword) { where += ` AND (name LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\')`; params.push(`%${escapeLike(keyword)}%`, `%${escapeLike(keyword)}%`); }
     if (stage) { where += ' AND stage = ?'; params.push(stage); }
     if (source) { where += ' AND source = ?'; params.push(source); }
     if (status) { where += ' AND status = ?'; params.push(status); }
@@ -217,30 +217,36 @@ router.post('/leads/:id/convert', (req, res) => {
     if (!row) return res.json(fail('线索不存在'));
     if (row.status === 'converted') return res.json(fail('该线索已成交，请勿重复转化'));
     const t = now();
-    db.prepare(`
-      UPDATE leads SET stage = 'deal', status = 'converted', converted_at = ?, updated_at = ?
-      WHERE id = ?
-    `).run(t, t, req.params.id);
-
-    let bonus = null;
     const { rewardPoints, rewardReason = '线索成交奖励' } = req.body;
-    if (rewardPoints && parseInt(rewardPoints) > 0 && row.student_id) {
-      const student = db.prepare('SELECT name FROM students WHERE id = ?').get(row.student_id);
-      if (student) {
-        const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(row.student_id);
-        if (!existAcc) {
-          db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-            .run(generateId('PTS'), row.student_id, student.name, rewardPoints, rewardPoints, t);
-        } else {
-          db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
-            .run(rewardPoints, rewardPoints, t, row.student_id);
+    // 状态流转与奖励发放同事务：此前分两步，发奖失败时线索已标记成交，
+    // 再点会命中「已成交」拒绝，奖励永远补不上（且读-改-写积分账户存在竞态）。
+    const bonus = db.transaction(() => {
+      const guarded = db.prepare(`
+        UPDATE leads SET stage = 'deal', status = 'converted', converted_at = ?, updated_at = ?
+        WHERE id = ? AND status != 'converted'
+      `).run(t, t, req.params.id);
+      if (guarded.changes === 0) return { err: '该线索已成交，请勿重复转化' };
+
+      if (rewardPoints && parseInt(rewardPoints) > 0 && row.student_id) {
+        const student = db.prepare('SELECT name FROM students WHERE id = ?').get(row.student_id);
+        if (student) {
+          const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(row.student_id);
+          if (!existAcc) {
+            db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+              .run(generateId('PTS'), row.student_id, student.name, rewardPoints, rewardPoints, t);
+          } else {
+            db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
+              .run(rewardPoints, rewardPoints, t, row.student_id);
+          }
+          const balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(row.student_id).balance;
+          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+            .run(generateId('PLG'), row.student_id, 'earn', rewardPoints, balance, rewardReason, t);
+          return { points: rewardPoints, balance };
         }
-        const balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(row.student_id).balance;
-        db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-          .run(generateId('PLG'), row.student_id, 'earn', rewardPoints, balance, rewardReason, t);
-        bonus = { points: rewardPoints, balance };
       }
-    }
+      return null;
+    })();
+    if (bonus && bonus.err) return res.json(fail(bonus.err));
     res.json(success({ id: req.params.id, converted: true, bonus }));
   } catch (err) {
     res.status(500).json(safeFail('转化失败'));
@@ -453,10 +459,10 @@ router.get('/points/list', (req, res) => {
     let where = 'WHERE 1=1';
     const params = [];
     if (keyword) {
-      where += ` AND (p.student_name LIKE ?
+      where += ` AND (p.student_name LIKE ? ESCAPE '\\'
         OR EXISTS (SELECT 1 FROM parent_bindings pb JOIN users u ON u.openid = pb.parent_openid
-                   WHERE pb.student_id = p.student_id AND u.phone LIKE ?))`;
-      params.push(`%${keyword}%`, `%${keyword}%`);
+                   WHERE pb.student_id = p.student_id AND u.phone LIKE ? ESCAPE '\\'))`;
+      params.push(`%${escapeLike(keyword)}%`, `%${escapeLike(keyword)}%`);
     }
     const total = db.prepare(`SELECT COUNT(*) as count FROM points p ${where}`).get(...params).count;
     const list = db.prepare(`

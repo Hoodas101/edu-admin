@@ -172,7 +172,6 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, reactive, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
 import { Search, Download } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { getPointsSummary, getPointsList, getPointsLogs, adjustPoints } from '@/api/modules'
@@ -341,15 +340,25 @@ const saveAdjust = async () => {
   adjusting.value = true
   try {
     if (batchAdjust.value) {
+      // 逐行提交非原子：失败时如实告知已成功的条数，避免用户误以为整批未生效/整批生效
+      let done = 0
       for (const row of selectedRows.value) {
-        await adjustPoints({
-          studentId: row.student_id,
-          type: adjustType.value,
-          amount: adjustAmount.value,
-          reason: adjustReason.value,
-        })
+        try {
+          await adjustPoints({
+            studentId: row.student_id,
+            type: adjustType.value,
+            amount: adjustAmount.value,
+            reason: adjustReason.value,
+          })
+          done += 1
+        } catch (e) {
+          ElMessage.error(`${row.student_name || row.student_id} 调整失败（已成功 ${done} 条，后续中断）`)
+          break
+        }
       }
-      ElMessage.success(`已${adjustType.value === 'earn' ? '发放' : '扣减'} ${selectedRows.value.length} 名成员积分`)
+      if (done === selectedRows.value.length) {
+        ElMessage.success(`已${adjustType.value === 'earn' ? '发放' : '扣减'} ${done} 名成员积分`)
+      }
       selectedRows.value = []
     } else {
       await adjustPoints({

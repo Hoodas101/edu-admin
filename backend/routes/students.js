@@ -12,22 +12,34 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, JWT_SECRET: QR_SECRET } = require('../utils');
 
-// 兼容迁移：会员编号 + 归档标记（退费/流失可归档隐藏，不删除）
-try { db.prepare("ALTER TABLE students ADD COLUMN member_no TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE students ADD COLUMN archived INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE students ADD COLUMN qr_exp INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-// 回填会员编号（NO-0001 起，按创建时间排序）
-try {
-  const empty = db.prepare("SELECT COUNT(*) c FROM students WHERE member_no = '' OR member_no IS NULL").get().c;
-  if (empty > 0) {
-    const rows = db.prepare('SELECT id FROM students ORDER BY created_at ASC, id ASC').all();
-    rows.forEach((r, i) => {
-      db.prepare("UPDATE students SET member_no = ? WHERE id = ?").run(`NO-${String(i + 1).padStart(4, '0')}`, r.id);
+// member_no / archived / qr_exp 列已收编至 migrations/011。
+// 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
+// 编号被 auth.js bindStudent 用于区分同名学员，整体重排会破坏对账与绑定。
+function nextMemberNo() {
+  const rows = db.prepare("SELECT member_no FROM students WHERE member_no LIKE 'NO-%'").all();
+  const max = rows
+    .map(x => { const m = /^NO-(\d+)$/.exec(x.member_no || ''); return m ? parseInt(m[1], 10) : 0; })
+    .reduce((a, b) => Math.max(a, b), 0);
+  return `NO-${String(max + 1).padStart(4, '0')}`;
+}
+function backfillEmptyMemberNo() {
+  try {
+    const empties = db.prepare("SELECT id FROM students WHERE member_no = '' OR member_no IS NULL ORDER BY created_at ASC, id ASC").all();
+    if (!empties.length) return;
+    const upd = db.prepare('UPDATE students SET member_no = ? WHERE id = ?');
+    let n = Number((/^NO-(\d+)$/.exec(nextMemberNo())[1])) - 1;
+    const tx = db.transaction(() => {
+      empties.forEach(s => {
+        n += 1;
+        upd.run(`NO-${String(n).padStart(4, '0')}`, s.id);
+      });
     });
-  }
-} catch (e) { /* 回填失败不阻塞 */ }
+    tx();
+  } catch (e) { /* 回填失败不阻塞启动 */ }
+}
+backfillEmptyMemberNo();
 
 // 认证中间件
 function requireAuth(req, res, next) {
@@ -63,14 +75,15 @@ router.post('/', (req, res) => {
     if (!name) return res.json(fail('成员姓名不能为空'));
 
     const id = generateId('stu_');
+    // 新建学员即分配会员编号（避免留空：空号曾触发整体重排导致全员编号漂移）
     db.prepare(`
-      INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, member_no, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
     `).run(id, name, gender || '', birthday || '', school || '', grade || '', hobby || '', level || '',
       height !== undefined && height !== '' ? Number(height) : 0,
       weight !== undefined && weight !== '' ? Number(weight) : 0,
       bmi !== undefined && bmi !== '' ? Number(bmi) : 0,
-      remark || '', now(), now(), now());
+      remark || '', now(), nextMemberNo(), now(), now());
 
     // 录入家长手机号时，同时建立绑定关系与家长账号，便于手机号登录
     if (phone && /^1[3-9]\d{9}$/.test(phone)) {
@@ -733,7 +746,7 @@ router.post('/:id/qrcode', requireAuth, (req, res) => {
     }
 
     // 生成签到二维码内容：随机 nonce + 60s 时效，避免离线伪造与重放
-    const QR_SECRET = process.env.JWT_SECRET || 'change-this-jwt-secret-before-deploy';
+    // QR_SECRET 复用服务端 JWT 密钥（未配置时已自动随机生成，不再是硬编码公开值）
     const nonce = crypto.randomBytes(12).toString('hex');
     const exp = Date.now() + 60 * 1000;
     const qrHash = crypto.createHash('sha256').update(`${id}:${nonce}:${exp}:${QR_SECRET}`).digest('hex').slice(0, 16);

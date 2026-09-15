@@ -58,9 +58,7 @@
 
 <script setup>
 import { ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Upload } from '@element-plus/icons-vue'
-import * as XLSX from 'xlsx'
 import { parseCsv, csvToObjects } from '@/utils/csv'
 import { exportXlsx } from '@/utils/xlsx'
 
@@ -101,10 +99,11 @@ const handleFile = (file) => {
     reader.readAsText(file, 'utf-8')
     return false
   }
-  // .xlsx / .xls：用 SheetJS 解析首个工作表
+  // .xlsx / .xls：用 SheetJS 解析首个工作表（371KB 重依赖，仅在真正导入 Excel 时动态加载）
   const reader = new FileReader()
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     try {
+      const XLSX = await import('xlsx')
       const wb = XLSX.read(e.target.result, { type: 'array' })
       const sheet = wb.Sheets[wb.SheetNames[0]]
       const json = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false })

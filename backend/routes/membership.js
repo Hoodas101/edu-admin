@@ -9,17 +9,12 @@
  */
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt } = require('../utils');
 
-// 轻量迁移：会员卡暂停字段（已存在则忽略）
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN paused_at INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN pause_total_ms INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN pause_reason TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-// 轻量迁移：计费模式（time 时效制 / count 次数制）
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN billing_mode TEXT DEFAULT 'time'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE member_cards ADD COLUMN billing_mode TEXT DEFAULT 'time'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN points_reward INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
+// schema 列（paused_at/billing_mode/points_reward/product_type 等）已收编至 migrations/011；
+// 此处仅保留数据回填。
 // 按卡类型名称回填默认赠送积分（体验10 / 月20 / 季50 / 年120）
 try {
   db.prepare(`
@@ -32,11 +27,6 @@ try {
     WHERE points_reward = 0
   `).run();
 } catch (e) { /* 忽略 */ }
-
-// 轻量迁移：产品类型（membership 上课/训练/会员服务 / goods 其他商品如球衣球鞋）
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN product_type TEXT DEFAULT 'membership'").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN unit TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE membership_cards ADD COLUMN description TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
 
 // 首次启用商品类型：把原 uniform_price 迁移为一条「训练球服」实物商品（仅当不存在 goods 记录时执行一次）
 try {
@@ -361,17 +351,21 @@ router.get('/my', (req, res) => {
     }
 
     // 补充会员中心所需字段：购买时间（激活时间回退创建时间）与累计购买次数（该成员已支付订单数）
-    const enriched = cards.map((c) => {
-      const orders = db.prepare(`
-        SELECT COUNT(*) as count FROM orders
-        WHERE student_id = ? AND status = 'paid'
-      `).get(c.student_id);
-      return {
-        ...c,
-        purchased_at: c.activated_at || c.created_at || null,
-        purchase_count: orders.count || 0,
-      };
-    });
+    // 单次 GROUP BY 聚合替代逐卡 COUNT（N+1：多孩家庭多卡时每次进会员中心都打一圈查询）
+    const studentIds = [...new Set(cards.map((c) => c.student_id))];
+    const countMap = {};
+    if (studentIds.length) {
+      const ph = studentIds.map(() => '?').join(',');
+      db.prepare(`
+        SELECT student_id, COUNT(*) as count FROM orders
+        WHERE student_id IN (${ph}) AND status = 'paid' GROUP BY student_id
+      `).all(...studentIds).forEach((r) => { countMap[r.student_id] = r.count; });
+    }
+    const enriched = cards.map((c) => ({
+      ...c,
+      purchased_at: c.activated_at || c.created_at || null,
+      purchase_count: countMap[c.student_id] || 0,
+    }));
 
     res.json(success(enriched));
   } catch (err) {
@@ -389,6 +383,9 @@ router.post('/deduct', (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可扣课'));
     const { scheduleId, studentId, cardId, classes = 1 } = req.body;
     if (!scheduleId || !studentId) return res.json(fail('缺少参数'));
+    // 扣课数量必须为正整数：负数会把「扣课」变成反向充值（remaining - (-N) = +N），凭空膨胀课时资产
+    const n = Number(classes);
+    if (!Number.isInteger(n) || n <= 0) return res.json(fail('扣课数量必须为正整数'));
 
     // 幂等检查
     const existing = db.prepare(
@@ -405,37 +402,48 @@ router.post('/deduct', (req, res) => {
 
     if (!card) return res.json(fail('没有可用会员卡'));
 
-    // 时效制会员：无需扣课，直接记录出席即可
+    // 时效制会员：无需扣课，直接记录出席即可（日志与幂等检查同事务，防并发重复记录）
     const mode = card.billing_mode || 'time';
     if (mode === 'time') {
-      db.prepare(`
-        INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-        VALUES (?, ?, ?, ?)
-      `).run(scheduleId, studentId, card.id, now());
+      db.transaction(() => {
+        db.prepare(`
+          INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
+          SELECT ?, ?, ?, ? WHERE NOT EXISTS (
+            SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?
+          )
+        `).run(scheduleId, studentId, card.id, now(), scheduleId, studentId);
+      })();
       return res.json(success({ cardId: card.id, mode: 'time', deducted: 0, message: '时效制会员无需扣课' }));
     }
 
     // 查找可用会员卡
-    if (card.remaining_classes < classes) return res.json(fail('剩余训练时长不足'));
+    if (card.remaining_classes < n) return res.json(fail('剩余训练时长不足'));
 
-    // 扣课
-    db.prepare(`
-      UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ? WHERE id = ?
-    `).run(classes, classes, now(), card.id);
+    // 扣课 + 日志同事务；UPDATE 带 remaining >= n 条件守卫，
+    // 杜绝并发扣同一张卡把余额扣成负数（检查与扣减之间的竞态）
+    const deductOutcome = db.transaction(() => {
+      const dup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
+      if (dup) return { err: '已扣过训练时长，无需重复扣课' };
+      const upd = db.prepare(`
+        UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ?
+        WHERE id = ? AND remaining_classes >= ?
+      `).run(n, n, now(), card.id, n);
+      if (upd.changes === 0) return { err: '剩余训练时长不足' };
+      db.prepare(`
+        INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
+        VALUES (?, ?, ?, ?)
+      `).run(scheduleId, studentId, card.id, now());
+      return { cardId: card.id };
+    })();
+    if (deductOutcome.err) return res.json(fail(deductOutcome.err));
 
-    // 记录扣课日志
-    db.prepare(`
-      INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-      VALUES (?, ?, ?, ?)
-    `).run(scheduleId, studentId, card.id, now());
-
-    const updatedCard = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(card.id);
+    const updatedCard = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(deductOutcome.cardId);
     res.json(success({
       cardId: card.id,
       mode: 'count',
       remainingClasses: updatedCard.remaining_classes,
       usedClasses: updatedCard.used_classes,
-      deducted: classes,
+      deducted: n,
     }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -464,15 +472,39 @@ router.post('/refund', (req, res) => {
       // 取得该卡的实际成交价（优先取购卡订单实付，避免按卡类型原价退款造成多退/少退）
       let paidPrice = 0;
       let orderId = null;
+      let orderPayable = 0;
+      let orderRefundedSoFar = 0;
       if (card.order_id) {
         orderId = card.order_id;
-        const order = db.prepare('SELECT items, payable_amount FROM orders WHERE id = ?').get(card.order_id);
+        const order = db.prepare('SELECT items, total_amount, payable_amount, refunded_amount FROM orders WHERE id = ?').get(card.order_id);
         if (order) {
+          orderPayable = Number(order.payable_amount) || 0;
+          orderRefundedSoFar = Number(order.refunded_amount) || 0;
           try {
             const items = JSON.parse(order.items || '[]');
-            const it = items.find(i => i.itemId === card.card_type_id) || items[0];
-            if (it && Number(it.price) > 0) paidPrice = Number(it.price);
-            else if (Number(order.payable_amount) > 0) paidPrice = Number(order.payable_amount);
+            // 必须精确匹配本卡商品：旧逻辑回退 items[0] 会把别的热价格算到本卡头上；
+            // 订单明细写入字段是 unitPrice（orders.js），旧逻辑读 it.price 永不命中，
+            // 再回退整单 payable_amount 会对多明细订单超退。
+            const it = items.find(i => i.itemId === card.card_type_id);
+            if (it) {
+              const qty = Number(it.quantity) || 1;
+              const unit = Number(it.unitPrice ?? it.price) || 0;
+              const total = Number(it.totalPrice) || 0;
+              let base = 0;
+              if (unit > 0) base = unit * qty;
+              else if (total > 0) base = total;
+              if (base > 0) {
+                // 按订单实付/原价比例折减：整单有折扣时按标价退会超退
+                const orderTotal = Number(order.total_amount) || 0;
+                paidPrice = (orderTotal > 0 && orderPayable > 0 && orderPayable < orderTotal)
+                  ? Math.round(base * orderPayable / orderTotal)
+                  : base;
+              }
+            }
+            // 单明细订单可安全回退整单实付
+            if (!paidPrice && items.length === 1 && orderPayable > 0) {
+              paidPrice = orderPayable;
+            }
           } catch (e) { /* 忽略损坏数据 */ }
         }
       }
@@ -491,6 +523,12 @@ router.post('/refund', (req, res) => {
         const totalMs = ((card.expires_at || 0) - (card.pause_total_ms || 0)) - (card.activated_at || 0);
         const remainMs = Math.max(0, (card.expires_at || 0) - currentTime);
         refundAmount = totalMs > 0 && paidPrice > 0 ? Math.max(0, Math.round(paidPrice * remainMs / totalMs)) : 0;
+      }
+      // 硬上限：不得超过该订单剩余额退额度（payable − 已退），与 orders/refund 的
+      // 「累计退款不能超过订单金额」口径一致。RFND 流水行按本值入账，不会超过原单可退额。
+      if (orderId && orderPayable > 0) {
+        const room = Math.max(0, orderPayable - orderRefundedSoFar);
+        if (refundAmount > room) refundAmount = room;
       }
 
       // 更新卡状态
@@ -526,7 +564,8 @@ router.post('/refund', (req, res) => {
 
       // 创建退款订单
       const refundOrderId = generateId('RFND');
-      const orderNo = `RF${Date.now()}`;
+      // order_no 有 UNIQUE 约束：同一毫秒内连续退卡/同事务重试时纯时间戳必撞（回归测试实测）
+      const orderNo = `RF${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
       db.prepare(`
         INSERT INTO orders (id, order_no, student_id, student_name, order_type, items, total_amount, payable_amount, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'refund', ?, ?, ?, 'refunded', ?, ?)

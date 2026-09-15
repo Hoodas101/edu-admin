@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate, recordAudit } = require('../utils');
 
 // 管理员判断（兼容 JWT 与 x-openid 开发模式）
 function isAdminReq(req) {
@@ -27,11 +27,7 @@ function canSales(req) {
   return isAdminReq(req) || hasPerm(getReqUser(req), 'sales');
 }
 
-// 轻量迁移：销售单扩展字段
-try { db.prepare('ALTER TABLE orders ADD COLUMN refunded_amount REAL DEFAULT 0').run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE orders ADD COLUMN salesperson TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE orders ADD COLUMN remark TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE orders ADD COLUMN is_1v1 INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
+// refunded_amount / salesperson / remark / is_1v1 列已收编至 migrations/011
 
 // 解析订单项目文本
 function parseOrderItems(itemsJson) {
@@ -305,6 +301,12 @@ router.post('/:id/pay', (req, res) => {
       if (!owned) return res.status(403).json(safeFail('无权操作该订单'));
     }
     if (order.status === 'cancelled' || order.status === 'refunded') return res.json(fail('订单已取消或已退款'));
+    // 家长自助「模拟支付」开关：真实微信支付接入后应设置 SIMULATED_PAY_DISABLED=1，
+    // 关闭待支付订单的自助标记已付通道（否则家长可把销售挂起的欠款单直接置为已付，
+    // 白得会员卡与赠送积分，资金流水与实收脱钩）。管理员仍可正常操作。
+    if (!isAdminReq(req) && process.env.SIMULATED_PAY_DISABLED === '1') {
+      return res.status(403).json(safeFail('该机构未开放自助支付，请联系机构收银'));
+    }
 
     const currentTime = now();
     // 事务内原子抢占：仅当订单仍为 pending 时置为 paid，影响行数=0 即说明已被其他并发请求处理，避免重复激活/重复赠分
@@ -331,6 +333,85 @@ router.post('/:id/pay', (req, res) => {
 });
 
 /**
+ * 按退费规则计算建议退款金额（refund-preview 与 refund 共用，保证预览不是装饰）
+ * @returns {{started, mode, amount, reason, cardInfo, remain, needApproval, processDays, rules}}
+ */
+function computeRefundSuggestion(order) {
+  const paid = Number(order.payable_amount) || 0;
+  const refundedSoFar = Number(order.refunded_amount) || 0;
+  const remain = Math.max(0, paid - refundedSoFar);
+
+  // 读取退费规则
+  let rules = {};
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'refund_rules'").get();
+    rules = row ? JSON.parse(row.value) : {};
+  } catch (e) { rules = {}; }
+  const beforeStart = rules.beforeStart || 'full';
+  const beforeStartPercent = Number(rules.beforeStartPercent) || 0;
+  const afterStart = rules.afterStart || 'unused';
+  const afterStartPercent = Number(rules.afterStartPercent) || 0;
+  const needApproval = rules.needApproval !== false;
+  const processDays = Number(rules.processDays) || 7;
+
+  // 关联会员卡
+  const card = db.prepare('SELECT * FROM member_cards WHERE order_id = ? ORDER BY created_at DESC LIMIT 1').get(order.id);
+  const currentTime = now();
+  let started = false;
+  let unusedRatio = 1;
+  let cardInfo = null;
+  if (card) {
+    started = !!(card.activated_at && card.activated_at <= currentTime);
+    const total = Number(card.total_classes) || 0;
+    const remaining = Number(card.remaining_classes) || 0;
+    if (card.billing_mode === 'count') {
+      unusedRatio = total > 0 ? Math.max(0, Math.min(1, remaining / total)) : 1;
+      cardInfo = { mode: 'count', total, remaining, used: Number(card.used_classes) || 0 };
+    } else {
+      // 时效制：扣除暂停时长
+      let activeMs = currentTime - (card.activated_at || currentTime);
+      if (card.paused_at) activeMs -= (currentTime - card.paused_at);
+      else if (card.pause_total_ms) activeMs -= card.pause_total_ms;
+      const totalMs = (Number(card.expires_at) || currentTime) - (card.activated_at || currentTime);
+      unusedRatio = totalMs > 0 ? Math.max(0, Math.min(1, (totalMs - Math.max(0, activeMs)) / totalMs)) : 1;
+      cardInfo = { mode: 'time', activatedAt: card.activated_at, expiresAt: card.expires_at, unusedRatio: Math.round(unusedRatio * 100) };
+    }
+  }
+
+  let mode = 'full';
+  let amount = remain;
+  let reason = '';
+  if (!started) {
+    if (beforeStart === 'percent') {
+      mode = 'ratio';
+      amount = Math.round(remain * (1 - beforeStartPercent / 100));
+      reason = `开课前退费，按规则扣除 ${beforeStartPercent}% 手续费`;
+    } else {
+      mode = 'full';
+      amount = remain;
+      reason = '开课前退费，按规则全额退款';
+    }
+  } else if (afterStart === 'percent') {
+    mode = 'ratio';
+    amount = Math.round(remain * (1 - afterStartPercent / 100));
+    reason = `开课后退费，按规则扣除 ${afterStartPercent}% 手续费`;
+  } else {
+    // unused：退还未消耗部分
+    mode = 'custom';
+    amount = Math.round(remain * unusedRatio);
+    reason = card
+      ? (card.billing_mode === 'count'
+          ? `开课后退费，按未上课时 ${cardInfo.remaining}/${cardInfo.total} 退还`
+          : `开课后退费，按剩余有效期 ${cardInfo.unusedRatio}% 退还`)
+      : '开课后退费，按未消耗部分退还';
+  }
+
+  return { started, mode, amount, reason, cardInfo, remain, needApproval, processDays,
+    cardId: card ? card.id : null,
+    rules: { beforeStart, beforeStartPercent, afterStart, afterStartPercent } };
+}
+
+/**
  * GET /api/orders/:id/refund-preview — 按退费规则计算建议退款金额
  * 返回：是否开课、适用规则、建议金额、卡剩余信息
  */
@@ -342,87 +423,19 @@ router.get('/:id/refund-preview', (req, res) => {
     if (!order) return res.json(fail('订单不存在'));
     if (order.status !== 'paid') return res.json(fail('只有已支付订单可退款'));
 
-    const paid = Number(order.payable_amount) || 0;
-    const refundedSoFar = Number(order.refunded_amount) || 0;
-    const remain = Math.max(0, paid - refundedSoFar);
-
-    // 读取退费规则
-    let rules = {};
-    try {
-      const row = db.prepare("SELECT value FROM settings WHERE key = 'refund_rules'").get();
-      rules = row ? JSON.parse(row.value) : {};
-    } catch (e) { rules = {}; }
-    const beforeStart = rules.beforeStart || 'full';
-    const beforeStartPercent = Number(rules.beforeStartPercent) || 0;
-    const afterStart = rules.afterStart || 'unused';
-    const afterStartPercent = Number(rules.afterStartPercent) || 0;
-    const needApproval = rules.needApproval !== false;
-    const processDays = Number(rules.processDays) || 7;
-
-    // 关联会员卡
-    const card = db.prepare('SELECT * FROM member_cards WHERE order_id = ? ORDER BY created_at DESC LIMIT 1').get(order.id);
-    const currentTime = now();
-    let started = false;
-    let unusedRatio = 1;
-    let cardInfo = null;
-    if (card) {
-      started = !!(card.activated_at && card.activated_at <= currentTime);
-      const total = Number(card.total_classes) || 0;
-      const remaining = Number(card.remaining_classes) || 0;
-      if (card.billing_mode === 'count') {
-        unusedRatio = total > 0 ? Math.max(0, Math.min(1, remaining / total)) : 1;
-        cardInfo = { mode: 'count', total, remaining, used: Number(card.used_classes) || 0 };
-      } else {
-        // 时效制：扣除暂停时长
-        let activeMs = currentTime - (card.activated_at || currentTime);
-        if (card.paused_at) activeMs -= (currentTime - card.paused_at);
-        else if (card.pause_total_ms) activeMs -= card.pause_total_ms;
-        const totalMs = (Number(card.expires_at) || currentTime) - (card.activated_at || currentTime);
-        unusedRatio = totalMs > 0 ? Math.max(0, Math.min(1, (totalMs - Math.max(0, activeMs)) / totalMs)) : 1;
-        cardInfo = { mode: 'time', activatedAt: card.activated_at, expiresAt: card.expires_at, unusedRatio: Math.round(unusedRatio * 100) };
-      }
-    }
-
-    let mode = 'full';
-    let amount = remain;
-    let reason = '';
-    if (!started) {
-      if (beforeStart === 'percent') {
-        mode = 'ratio';
-        amount = Math.round(remain * (1 - beforeStartPercent / 100));
-        reason = `开课前退费，按规则扣除 ${beforeStartPercent}% 手续费`;
-      } else {
-        mode = 'full';
-        amount = remain;
-        reason = '开课前退费，按规则全额退款';
-      }
-    } else if (afterStart === 'percent') {
-      mode = 'ratio';
-      amount = Math.round(remain * (1 - afterStartPercent / 100));
-      reason = `开课后退费，按规则扣除 ${afterStartPercent}% 手续费`;
-    } else {
-      // unused：退还未消耗部分
-      mode = 'custom';
-      amount = Math.round(remain * unusedRatio);
-      reason = card
-        ? (card.billing_mode === 'count'
-            ? `开课后退费，按未上课时 ${cardInfo.remaining}/${cardInfo.total} 退还`
-            : `开课后退费，按剩余有效期 ${cardInfo.unusedRatio}% 退还`)
-        : '开课后退费，按未消耗部分退还';
-    }
-
+    const s = computeRefundSuggestion(order);
     res.json(success({
-      started,
-      mode,
-      amount,
-      reason,
-      paid,
-      refundedSoFar,
-      remain,
-      cardInfo,
-      needApproval,
-      processDays,
-      rules: { beforeStart, beforeStartPercent, afterStart, afterStartPercent },
+      started: s.started,
+      mode: s.mode,
+      amount: s.amount,
+      reason: s.reason,
+      paid: Number(order.payable_amount) || 0,
+      refundedSoFar: Number(order.refunded_amount) || 0,
+      remain: s.remain,
+      cardInfo: s.cardInfo,
+      needApproval: s.needApproval,
+      processDays: s.processDays,
+      rules: s.rules,
     }));
   } catch (err) {
     console.error('[orders refund-preview]', err);
@@ -432,14 +445,17 @@ router.get('/:id/refund-preview', (req, res) => {
 
 /**
  * POST /api/orders/:id/refund — 申请退款
- * Body: { reason }
+ * Body: { reason, refundAmount?, confirmOverride? }
+ * refundAmount 省略时按退费规则建议值退款；显式传入且与建议值不符时必须带 confirmOverride=true，
+ * 防止预览页只是装饰（旧版可绕过规则全额甚至任意金额退款）。
  */
 router.post('/:id/refund', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可操作退款'));
     const { id } = req.params;
-    const { reason = '', refundAmount } = req.body;
+    const { reason = '', refundAmount, confirmOverride } = req.body;
     const currentTime = now();
+    let clawback = null; // 部分退款回收权益的说明（返回给前端提示）
 
     // 事务内原子处理：重读订单 + 乐观锁（基于 refunded_amount 未变）避免并发超额退款 / 重复退款流水
     const result = db.transaction(() => {
@@ -449,16 +465,31 @@ router.post('/:id/refund', (req, res) => {
 
       const paidAmount = Number(order.payable_amount) || 0;
       const refundedSoFar = Number(order.refunded_amount) || 0;
-      const amount = refundAmount === undefined || refundAmount === null || refundAmount === ''
-        ? paidAmount
+
+      // 规则建议金额（与 refund-preview 同一计算）：省略入参时按建议值退款
+      const suggestion = computeRefundSuggestion(order);
+      const requested = refundAmount === undefined || refundAmount === null || refundAmount === ''
+        ? suggestion.amount
         : Number(refundAmount);
-      if (!Number.isFinite(amount) || amount <= 0 || amount > paidAmount) {
+      if (!Number.isFinite(requested) || requested <= 0 || requested > paidAmount) {
         return { err: '退款金额不合法（应在 0 至订单金额之间）' };
       }
+      // 偏离规则建议值需显式覆盖确认（允许 ¥1 计算误差）
+      if (Math.abs(requested - suggestion.amount) > 1 && !confirmOverride) {
+        return {
+          mismatch: true,
+          suggested: suggestion.amount,
+          reason: suggestion.reason,
+        };
+      }
+      const amount = requested;
       const newRefunded = refundedSoFar + amount;
       if (newRefunded > paidAmount) return { err: '累计退款金额不能超过订单金额' };
 
       const isFull = newRefunded >= paidAmount;
+      // 是否走了「规则建议值」（¥1 容差内）：只有按规则退款才触发权益回收，
+      // 协商性自定义金额（confirmOverride）视为机构自愿让利，不动卡内权益。
+      const appliedSuggestion = Math.abs(requested - suggestion.amount) <= 1;
       // 乐观锁：仅当当前 refunded_amount 未发生变化时才写入，并发请求因读到旧值而更新失败
       const upd = db.prepare("UPDATE orders SET refunded_amount = ?, status = CASE WHEN ? >= ? THEN 'refunded' ELSE status END, updated_at = ? WHERE id = ? AND refunded_amount = ?")
         .run(newRefunded, newRefunded, paidAmount, currentTime, order.id, refundedSoFar);
@@ -486,6 +517,20 @@ router.post('/:id/refund', (req, res) => {
             WHERE student_id = ?
           `).run(totalReward, totalReward, currentTime, order.student_id);
         }
+      } else if (appliedSuggestion && suggestion.started && suggestion.mode === 'custom' && suggestion.cardId) {
+        // 「按未上课时退还」的部分退款：退的现金正是卡内未用权益的对价，必须同步回收，
+        // 否则学员既拿回剩余课时退款、又能继续把课上完（退款+耗课双拿）。
+        // 协商性自定义金额与「扣除手续费」比例退款不动权益——那是机构自愿让利/违约金语义。
+        const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(suggestion.cardId);
+        if (card && card.status !== 'refunded') {
+          if ((card.billing_mode || 'time') === 'count') {
+            db.prepare('UPDATE member_cards SET remaining_classes = 0, updated_at = ? WHERE id = ?').run(currentTime, card.id);
+            clawback = `已同步回收卡内剩余 ${card.remaining_classes || 0} 次课时`;
+          } else {
+            db.prepare('UPDATE member_cards SET expires_at = ?, updated_at = ? WHERE id = ?').run(currentTime, card.id);
+            clawback = '已同步清零卡内剩余有效期';
+          }
+        }
       }
 
       // 创建退款支付记录（记录实际退款金额）
@@ -493,12 +538,36 @@ router.post('/:id/refund', (req, res) => {
       db.prepare('INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(paymentId, order.id, order.order_no, order.user_id, amount, 'wechat', 'refunded', currentTime, currentTime);
 
+      // 资金流出必须留痕：金额、是否规则建议值、是否触发权益回收，事后可追责
+      recordAudit(db, {
+        entity: 'order',
+        entityId: order.id,
+        action: 'refund',
+        actorId: getOpenId(req),
+        actorRole: req.userRole || '',
+        before: { refunded_amount: refundedSoFar, status: order.status },
+        after: {
+          refunded_amount: newRefunded,
+          amount,
+          full: isFull,
+          appliedSuggestion,
+          clawback: clawback || null,
+          reason,
+          payment_id: paymentId,
+        },
+      });
+
       return { ok: true, amount, full: isFull, reason };
     })();
 
     if (result.err) return res.json(fail(result.err));
     if (result.conflict) return res.json(fail('退款处理冲突，请稍后重试'));
-    res.json(success({ refunded: true, refundAmount: result.amount, full: result.full, reason: result.reason }));
+    if (result.mismatch) {
+      return res.json(fail(
+        `退款金额与退费规则建议(¥${result.suggested})不符：${result.reason}。如确认偏离规则请勾选「按规则外金额退款」`
+      ));
+    }
+    res.json(success({ refunded: true, refundAmount: result.amount, full: result.full, reason: result.reason, clawback }));
   } catch (err) {
     console.error('[orders refund]', err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -507,6 +576,7 @@ router.post('/:id/refund', (req, res) => {
 
 /**
  * PUT /api/orders/:id — 修改订单（管理员）：金额 / 签单人 / 备注
+ * 金额与支付流水变更在同一事务内完成，避免 payments 与 orders 撕裂产生对账差异
  */
 router.put('/:id', (req, res) => {
   try {
@@ -521,20 +591,29 @@ router.put('/:id', (req, res) => {
 
     const fields = [];
     const params = [];
+    let syncPaymentAmount = null;
     if (payableAmount !== undefined) {
       const amount = Number(payableAmount);
       if (!isFinite(amount) || amount < 0) return res.json(fail('金额不合法'));
+      // 不得低于已退金额：否则净营收统计与退款上限校验口径全部失真
+      const refundedSoFar = Number(order.refunded_amount) || 0;
+      if (amount < refundedSoFar) return res.json(fail(`金额不能低于已退款金额 ¥${refundedSoFar}`));
       fields.push('payable_amount = ?');
       params.push(amount);
-      // 同步支付记录金额
-      db.prepare('UPDATE payments SET amount = ? WHERE order_id = ?').run(amount, id);
+      syncPaymentAmount = amount;
     }
     if (salesperson !== undefined) { fields.push('salesperson = ?'); params.push(String(salesperson)); }
     if (remark !== undefined) { fields.push('remark = ?'); params.push(String(remark)); }
     if (fields.length === 0) return res.json(fail('没有需要修改的内容'));
 
     params.push(now(), id);
-    db.prepare(`UPDATE orders SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);
+    // 改价与支付流水同步必须同事务：中途失败会留下「订单已改价、流水仍旧金额」的对账裂缝
+    db.transaction(() => {
+      if (syncPaymentAmount !== null) {
+        db.prepare('UPDATE payments SET amount = ? WHERE order_id = ?').run(syncPaymentAmount, id);
+      }
+      db.prepare(`UPDATE orders SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);
+    })();
     res.json(success({ id }));
   } catch (err) {
     console.error('[orders update]', err);
@@ -570,32 +649,48 @@ router.post('/:id/cancel', (req, res) => {
     }
 
     const currentTime = now();
-    if (order.status === 'paid') {
-      // 回滚会员卡
-      const cards = db.prepare("SELECT * FROM member_cards WHERE order_id = ? AND status = 'active'").all(id);
-      for (const card of cards) {
-        db.prepare("UPDATE member_cards SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, card.id);
+    // 已支付订单的资金回滚（会员卡、积分、支付流水、订单状态）整体事务化：
+    // 中途抛错不再留下「卡已回收但订单仍 paid」的半回滚状态
+    db.transaction(() => {
+      if (order.status === 'paid') {
+        // 回滚会员卡
+        const cards = db.prepare("SELECT * FROM member_cards WHERE order_id = ? AND status = 'active'").all(id);
+        for (const card of cards) {
+          db.prepare("UPDATE member_cards SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, card.id);
+        }
+        // 回收购买赠送的积分（按 订单+商品 维度查找）
+        const logs = db.prepare("SELECT * FROM point_logs WHERE reference_id GLOB ? AND type = 'earn'").all('order_' + id + '*');
+        let totalCancelReward = 0;
+        for (const l of logs) {
+          totalCancelReward += Number(l.amount) || 0;
+          db.prepare("UPDATE point_logs SET type = 'refund', description = '订单取消回收积分' WHERE id = ?").run(l.id);
+        }
+        if (totalCancelReward > 0) {
+          db.prepare(`
+            UPDATE points SET
+              total_earned = MAX(0, total_earned - ?),
+              balance = MAX(0, balance - ?),
+              updated_at = ?
+            WHERE student_id = ?
+          `).run(totalCancelReward, totalCancelReward, currentTime, order.student_id);
+        }
+        db.prepare("UPDATE payments SET status = 'refunded' WHERE order_id = ?").run(id);
       }
-      // 回收购买赠送的积分（按 订单+商品 维度查找）
-      const logs = db.prepare("SELECT * FROM point_logs WHERE reference_id GLOB ? AND type = 'earn'").all('order_' + id + '*');
-      let totalCancelReward = 0;
-      for (const l of logs) {
-        totalCancelReward += Number(l.amount) || 0;
-        db.prepare("UPDATE point_logs SET type = 'refund', description = '订单取消回收积分' WHERE id = ?").run(l.id);
-      }
-      if (totalCancelReward > 0) {
-        db.prepare(`
-          UPDATE points SET
-            total_earned = MAX(0, total_earned - ?),
-            balance = MAX(0, balance - ?),
-            updated_at = ?
-          WHERE student_id = ?
-        `).run(totalCancelReward, totalCancelReward, currentTime, order.student_id);
-      }
-      db.prepare("UPDATE payments SET status = 'refunded' WHERE order_id = ?").run(id);
-    }
 
-    db.prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, id);
+      db.prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, id);
+      if (order.status === 'paid') {
+        // 已支付订单取消涉及资金回滚（卡回收/积分扣回/流水冲销），与退款同等留痕
+        recordAudit(db, {
+          entity: 'order',
+          entityId: id,
+          action: 'cancel_paid',
+          actorId: getOpenId(req),
+          actorRole: req.userRole || '',
+          before: { status: 'paid', payable_amount: order.payable_amount },
+          after: { status: 'cancelled' },
+        });
+      }
+    })();
     res.json(success({ cancelled: true }));
   } catch (err) {
     console.error('[orders cancel]', err);

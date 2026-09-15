@@ -97,6 +97,10 @@ export const getPayrollCoaches = (params) => request.get('/payroll/coaches', { p
 export const getPayrollCoachDetail = (id, params) => request.get(`/payroll/coach/${id}`, { params })
 export const updatePayrollRule = (id, payRule) => request.put(`/payroll/coach/${id}/rule`, { payRule })
 export const getMyPayroll = (params) => request.get('/payroll/me', { params })
+// 按月结算（写入 payroll_logs，净利润随之扣减课酬）/ 结算记录 / 作废
+export const settlePayroll = (month) => request.post('/payroll/settle', { month })
+export const getPayrollLogs = (month) => request.get('/payroll/logs', { params: month ? { month } : {} })
+export const voidPayrollLog = (id) => request.post(`/payroll/logs/${id}/void`)
 
 // 训练点评
 export const getComments = (params) => request.get('/comments', { params })

@@ -120,7 +120,6 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
 import { getFinanceSummary, getFinanceMonthly, getFinanceByProduct, getFinanceBySales } from '@/api/modules'
 import PageHeader from '@/components/PageHeader.vue'
 

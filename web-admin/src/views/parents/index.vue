@@ -182,7 +182,6 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
 import { Search, Download, Bell } from '@element-plus/icons-vue'
 import { getParents, sendMessage, getSuppressions, addSuppression, deleteSuppression } from '@/api/modules'
 import dayjs from 'dayjs'

@@ -8,11 +8,7 @@ const router = express.Router();
 const db = require('../db');
 const { success, fail, safeFail, generateId, getOpenId, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser } = require('../utils');
 
-// 兼容迁移：班级/活动归档标记
-try { db.prepare("ALTER TABLE courses ADD COLUMN archived INTEGER DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-// 兼容迁移：教练课时单价（元/节，课时费核算）
-try { db.prepare("ALTER TABLE teachers ADD COLUMN class_fee REAL DEFAULT 0").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE teachers ADD COLUMN pay_rule TEXT").run(); } catch (e) { /* 已存在 */ }
+// courses.archived / teachers.class_fee / teachers.pay_rule 列已收编至 migrations/011
 
 // 管理接口权限校验：管理员全部放行；拥有看板权限的员工（如销售）放行只读查询，写操作再按路由校验
 router.use((req, res, next) => {
@@ -48,10 +44,22 @@ const staffRead = (req, res, next) => {
 };
 
 /**
+ * 看板数据守卫：含全机构收入/订单等经营数据，仅管理员或显式拥有 dashboard 权限的员工可见。
+ * 顶部 guard 按教练角色放行是给课务参考数据（teachers/courses 下拉）用的，
+ * 不代表教练可读财务报表；Web 路由与小程序 hasPerm('dashboard') 均按权限判定，后端补齐同一契约。
+ */
+const dashboardGuard = (req, res, next) => {
+  if (!isAdminReq(req) && !hasPerm(getReqUser(req), 'dashboard')) {
+    return res.status(403).json({ code: 403, data: null, message: '无权限查看数据看板' });
+  }
+  next();
+};
+
+/**
  * GET /api/admin/dashboard — 数据看板
  * 返回核心运营指标：成员数、今日课表、今日签到、今日订单、即将到期卡、到场率
  */
-router.get('/dashboard', (req, res) => {
+router.get('/dashboard', dashboardGuard, (req, res) => {
   try {
     const today = formatDate(now());
     const currentTime = now();
@@ -275,7 +283,7 @@ router.get('/dashboard', (req, res) => {
  * GET /api/admin/charts — 看板图表数据
  * 近7天到场率、报名活动分布、产品销量统计
  */
-router.get('/charts', (req, res) => {
+router.get('/charts', dashboardGuard, (req, res) => {
   try {
     // 到场趋势支持按周期查询：week=近7天，month=近30天（默认 week，与看板“本周/本月”切换联动）
     const period = req.query.period === 'month' ? 'month' : 'week';
@@ -531,10 +539,20 @@ router.get('/teachers', staffRead, (req, res) => {
     // includeInactive=1 时同时返回停用教练（管理页需要看到停用项以便恢复）
     const where = req.query.includeInactive === '1' ? '' : "WHERE status = 'active'";
     const isAdmin = isAdminReq(req);
-    const list = db.prepare(`
+    const teachers = db.prepare(`
       SELECT *
       FROM teachers ${where} ORDER BY created_at ASC
-    `).all().map((t) => {
+    `).all();
+    // 批量取关联数据，替代逐教练查 users/schedules（N+1×3）
+    const userByPhone = {};
+    db.prepare("SELECT phone, role, permissions FROM users WHERE phone IS NOT NULL AND phone != ''").all()
+      .forEach((u) => { userByPhone[u.phone] = u; });
+    const scheduleCountByTeacher = {};
+    db.prepare(`
+      SELECT teacher_id, COUNT(*) as count FROM schedules
+      WHERE status = 'scheduled' AND date >= date('now') GROUP BY teacher_id
+    `).all().forEach((r) => { scheduleCountByTeacher[r.teacher_id] = r.count; });
+    const list = teachers.map((t) => {
       const out = { ...t };
       // 手机号、薪酬规则与单课时费仅管理员可见，避免向教练/销售泄露
       if (!isAdmin) {
@@ -548,17 +566,11 @@ router.get('/teachers', staffRead, (req, res) => {
       }
       out.payRule = payRule;
       // 关联登录账号角色与自定义权限
-      out.role = t.phone
-        ? (db.prepare('SELECT role FROM users WHERE phone = ?').get(t.phone) || {}).role || 'coach'
-        : 'coach';
-      out.permissions = t.phone
-        ? resolvePerms(db.prepare('SELECT role, permissions FROM users WHERE phone = ?').get(t.phone) || { role: 'coach' })
-        : resolvePerms({ role: 'coach' });
+      const linked = (t.phone && userByPhone[t.phone]) || null;
+      out.role = linked ? (linked.role || 'coach') : 'coach';
+      out.permissions = resolvePerms(linked || { role: 'coach' });
       // 该教练未来排课数量（详情展示）
-      out.scheduleCount = db.prepare(`
-        SELECT COUNT(*) as count FROM schedules
-        WHERE teacher_id = ? AND status = 'scheduled' AND date >= date('now')
-      `).get(t.id).count;
+      out.scheduleCount = scheduleCountByTeacher[t.id] || 0;
       return out;
     });
     res.json(success({ list, total: list.length }));
@@ -614,14 +626,17 @@ router.get('/parents', adminOnly, (req, res) => {
  */
 router.get('/staff-options', (req, res) => {
   try {
-    const list = db.prepare(`
+    const teachers = db.prepare(`
       SELECT id, name, phone FROM teachers WHERE status = 'active' ORDER BY created_at ASC
-    `).all().map((t) => ({
+    `).all();
+    // 一次取全部「手机号→角色」映射，替代逐教练查 users（N+1）
+    const roleByPhone = {};
+    db.prepare("SELECT phone, role FROM users WHERE phone != '' AND phone IS NOT NULL").all()
+      .forEach((u) => { roleByPhone[u.phone] = u.role; });
+    const list = teachers.map((t) => ({
       id: t.id,
       name: t.name,
-      role: t.phone
-        ? (db.prepare('SELECT role FROM users WHERE phone = ?').get(t.phone) || {}).role || 'coach'
-        : 'coach',
+      role: (t.phone && roleByPhone[t.phone]) || 'coach',
     }));
     res.json(success({ list, total: list.length }));
   } catch (err) {
@@ -734,7 +749,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
             db.prepare('UPDATE users SET phone = ?, openid = ?, updated_at = ? WHERE id = ?')
               .run(newPhone, `phone_${newPhone}`, now(), oldUser.id);
           } else {
-            db.prepare("UPDATE users SET status = 'inactive' WHERE id = ?").run(oldUser.id);
+            db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE id = ?").run(now(), oldUser.id);
           }
         }
       }
@@ -744,7 +759,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
       syncCoachAccount(newPhone || oldPhone, name || existing.name);
     }
     if (status === 'inactive') {
-      db.prepare("UPDATE users SET status = 'inactive' WHERE phone = ?").run(newPhone || oldPhone);
+      db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?").run(now(), newPhone || oldPhone);
     }
 
     // 修改权限：同步登录账号角色（coach / admin / sales）与自定义权限
@@ -759,6 +774,10 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         updates.push('permissions = ?');
         params.push(Array.isArray(permissions) ? JSON.stringify(permissions) : '');
       }
+      // 角色变更需吊销旧 Token（role 固化在 JWT payload 中，否则降级后旧 Token 仍携带原角色）
+      if (hasValidRole && targetUser && targetUser.role !== role) {
+        updates.push('token_version = COALESCE(token_version,0) + 1');
+      }
       if (updates.length) {
         params.push(now(), permUser.id);
         db.prepare(`UPDATE users SET ${updates.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);
@@ -769,15 +788,16 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, '', ?, ?, 'active', ?, ?)
       `).run(generateId('user_'), `phone_${targetPhone}`, targetPhone, name || existing.name, role,
-        hashPassword('123456'), now(), now());
+        hashPassword(STAFF_DEFAULT_PASSWORD), now(), now());
     }
 
-    // 重置登录密码为默认密码
+    // 重置登录密码为初始密码（STAFF_DEFAULT_PASSWORD 可配，默认 123456）
     if (resetPassword) {
       const targetPhone = newPhone || oldPhone;
       if (targetPhone) {
-        db.prepare("UPDATE users SET password = ?, updated_at = ? WHERE phone = ?")
-          .run(hashPassword('123456'), now(), targetPhone);
+        // bump token_version：重置后该账号旧 Token 全部失效
+        db.prepare("UPDATE users SET password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?")
+          .run(hashPassword(STAFF_DEFAULT_PASSWORD), now(), targetPhone);
       }
     }
     res.json(success({ id: req.params.id }));
@@ -807,9 +827,9 @@ router.delete('/teachers/:id', adminOnly, (req, res) => {
       }
     }
     db.prepare("UPDATE teachers SET status = 'inactive' WHERE id = ?").run(req.params.id);
-    // 同步停用教练登录账号
+    // 同步停用教练登录账号（bump token_version 吊销其旧 Token）
     if (existing.phone) {
-      db.prepare("UPDATE users SET status = 'inactive' WHERE phone = ?").run(existing.phone);
+      db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?").run(now(), existing.phone);
     }
     // 该教师未来的排课置空待重新分配（保留课程，避免家长端显示已停用教师）
     db.prepare(`
@@ -925,21 +945,45 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
     const existing = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
     if (!existing) return res.json(fail('活动不存在'));
     const scheds = db.prepare('SELECT id FROM schedules WHERE course_id = ?').all(req.params.id);
-    if (scheds.length) {
-      const ph = scheds.map(() => '?').join(',');
-      const ids = scheds.map((s) => s.id);
-      // 级联清理排期关联数据，避免孤儿记录（请假/扣课日志/签到积分流水/训练点评）
-      db.prepare('DELETE FROM enrollments WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM attendances WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM leave_requests WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM deduction_logs WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM point_logs WHERE reference_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM coach_comments WHERE schedule_id IN (' + ph + ')').run(...ids);
-      db.prepare('DELETE FROM schedules WHERE id IN (' + ph + ')').run(...ids);
-    }
-    db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
+    // 级联清理包事务：中途失败会留下「报名已删、排期还在」的半删状态。
+    // 删除签到流水时同步回滚 points.balance/total_earned——此前只删流水不改余额，
+    // 学员积分账户凭空多出已删除活动的分数，兑换时账实不符。
+    db.transaction(() => {
+      if (scheds.length) {
+        const ph = scheds.map(() => '?').join(',');
+        const ids = scheds.map((s) => s.id);
+        // 级联清理排期关联数据，避免孤儿记录（请假/扣课日志/签到积分流水/训练点评）
+        // 删除签到积分流水时同步回滚 points.balance/total_earned——此前只删流水不改余额，
+        // 学员积分账户凭空多出已删除活动的分数，兑换时账实不符。
+        // 旧版只回滚 'earn'，漏掉签到奖励的 'checkin' 发放（见 checkin.js addPoints）；
+        // 回滚额取被删流水的净额 SUM(amount)（含 reversePoints 冲销的负向行，
+        // 只加正数会在「发放后又撤销」的场次上多扣），净额 <=0 的学员无需回滚。
+        const affected = db.prepare(`
+          SELECT student_id, SUM(amount) total FROM point_logs
+          WHERE type IN ('earn','checkin') AND reference_id IN (${ph}) GROUP BY student_id
+        `).all(...ids).filter((a) => (a.total || 0) > 0);
+        db.prepare('DELETE FROM enrollments WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM attendances WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM leave_requests WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM deduction_logs WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM point_logs WHERE reference_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM coach_comments WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM schedules WHERE id IN (' + ph + ')').run(...ids);
+        for (const a of affected) {
+          db.prepare(`
+            UPDATE points SET
+              total_earned = MAX(0, total_earned - ?),
+              balance = MAX(0, balance - ?),
+              updated_at = ?
+            WHERE student_id = ?
+          `).run(a.total, a.total, now(), a.student_id);
+        }
+      }
+      db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
+    })();
     res.json(success({ id: req.params.id }));
   } catch (err) {
+    console.error('[admin course delete]', err);
     res.status(500).json(safeFail('删除活动失败'));
   }
 });
@@ -1083,6 +1127,11 @@ module.exports = router;
  * @param {string} phone
  * @param {string} name
  */
+// 员工初始/重置密码：可通过 STAFF_DEFAULT_PASSWORD 环境变量改为机构自定义初始密码。
+// 硬编码 123456 意味着任何拿到 MIT 源码的人都可尝试「已知手机号 + 123456」接管员工账号；
+// 正式部署务必设置自定义值，并在创建员工后通过私密渠道告知本人尽快修改。
+const STAFF_DEFAULT_PASSWORD = process.env.STAFF_DEFAULT_PASSWORD || '123456';
+
 function syncCoachAccount(phone, name) {
   if (!phone) return;
   const existing = db.prepare('SELECT id, role FROM users WHERE phone = ?').get(phone);
@@ -1094,7 +1143,7 @@ function syncCoachAccount(phone, name) {
     db.prepare(`
       INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, '', 'coach', ?, 'active', ?, ?)
-    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword('123456'), now(), now());
+    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(STAFF_DEFAULT_PASSWORD), now(), now());
   }
 }
 

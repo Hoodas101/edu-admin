@@ -363,7 +363,6 @@ const props = defineProps({
 })
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import dayjs from 'dayjs'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, ArrowLeft, ArrowRight, Download, User, Clock, UserFilled } from '@element-plus/icons-vue'
 import {
   getTeachers,

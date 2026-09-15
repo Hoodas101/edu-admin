@@ -57,7 +57,7 @@
       </div>
       <div class="toolbar-right">
         <el-button @click="resetFilters">重置</el-button>
-        <el-button type="primary" :icon="Download" @click="onExport">导出</el-button>
+        <el-button type="primary" :icon="Download" :loading="exporting" @click="onExport">导出</el-button>
       </div>
     </div>
 
@@ -141,7 +141,6 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 echarts.use([BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 import { Download } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import {
   getAttendances,
@@ -260,7 +259,17 @@ function resetFilters() {
 }
 
 // 导出 CSV（按当前筛选拉取全部记录）
+const exporting = ref(false)
+// 防 Excel/Numbers 公式注入：以 = + - @ 开头的单元格会被当作公式执行，
+// 前置单引号强制按文本处理（姓名/课程名等均为用户可录入字段）
+const csvCell = (v) => {
+  const s = String(v ?? '')
+  const guarded = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s
+  return `"${guarded.replace(/"/g, '""')}"`
+}
 async function onExport() {
+  if (exporting.value) return
+  exporting.value = true
   try {
     // 后端 parsePagination 硬顶 pageSize=500，单页拉取会静默截断超量数据；
     // 循环翻页拉全量，与 leave/feedback/students 的导出一致
@@ -283,7 +292,7 @@ async function onExport() {
         r.endTime || '',
         dm,
         statusText(r.status),
-      ].map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
+      ].map(csvCell).join(','))
     })
     const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
@@ -294,6 +303,8 @@ async function onExport() {
     URL.revokeObjectURL(url)
   } catch (e) {
     ElMessage.error('导出失败')
+  } finally {
+    exporting.value = false
   }
 }
 

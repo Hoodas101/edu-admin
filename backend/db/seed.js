@@ -16,7 +16,8 @@
  * - 系统设置
  * - 家长-成员绑定（含 parent_openid）
  *
- * 运行方式：npm run seed  或  node db/seed.js
+ * 运行方式：node db/seed.js —— 仅空库可灌；库中已有账号时拒绝执行（防误清生产数据），
+ * 确需重置为演示数据：node db/seed.js --force  或  npm run seed:force
  */
 const db = require('./index');
 
@@ -63,6 +64,8 @@ function seed() {
     { id: 'user_teacher_001', openid: 'wx_teacher_001', phone: '13800000011', nickname: '王教练', role: 'coach', avatar: '', password: '123456' },
     { id: 'user_teacher_002', openid: 'wx_teacher_002', phone: '13800000012', nickname: '李教练', role: 'coach', avatar: '', password: '123456' },
     { id: 'user_teacher_003', openid: 'wx_teacher_003', phone: '13800000013', nickname: '张教练', role: 'coach', avatar: '', password: '123456' },
+    // 销售（full-system CI 夹具依赖此身份做越权矩阵）
+    { id: 'user_sales_001', openid: 'wx_sales_001', phone: '13700000001', nickname: '销售示例', role: 'sales', avatar: '', password: '123456' },
     // 家长（12 位）
     { id: 'user_parent_001', openid: 'wx_parent_001', phone: '13900000001', nickname: '小明爸爸', role: 'parent', avatar: '' },
     { id: 'user_parent_002', openid: 'wx_parent_002', phone: '13900000002', nickname: '小红妈妈', role: 'parent', avatar: '' },
@@ -469,7 +472,20 @@ function seed() {
 }
 
 // 如果直接运行此文件
+// 破坏性守卫：seed() 会先清空 19 张表再写入，因此默认拒绝直接执行——
+// 必须显式 `node db/seed.js --force`（或环境变量 SEED_FORCE=1）才真正清库灌数据，
+// 防止误跑部署脚本/手动命令把生产库抹平。
 if (require.main === module) {
+  const forced = process.argv.includes('--force') || process.env.SEED_FORCE === '1'
+  let hasData = 0
+  try {
+    hasData = db.prepare('SELECT COUNT(*) c FROM users').get().c
+  } catch (e) { /* users 表不存在 = 空库 */ }
+  if (hasData > 0 && !forced) {
+    console.error(`[Seed] 已拒绝：库中存在 ${hasData} 个账号，seed 会清空全部数据。`)
+    console.error('[Seed] 确需重置为演示数据请加 --force：node db/seed.js --force')
+    process.exit(1)
+  }
   seed();
 }
 

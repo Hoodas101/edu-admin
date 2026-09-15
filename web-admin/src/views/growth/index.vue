@@ -348,12 +348,12 @@
 
     <!-- 线索编辑弹窗 -->
     <el-dialog v-model="leadDialogOpen" :title="leadForm.id ? '编辑线索' : '新增线索'" class="dlg-md">
-      <el-form label-position="top">
+      <el-form ref="leadFormRef" :model="leadForm" :rules="leadRules" label-position="top">
         <div class="form-grid">
-          <el-form-item label="姓名" required>
+          <el-form-item label="姓名" prop="name">
             <el-input v-model="leadForm.name" placeholder="家长/成员姓名" maxlength="20" />
           </el-form-item>
-          <el-form-item label="电话">
+          <el-form-item label="电话" prop="phone">
             <el-input v-model="leadForm.phone" placeholder="手机号" maxlength="11" />
           </el-form-item>
         </div>
@@ -389,7 +389,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="下次跟进时间">
-          <el-date-picker v-model="leadForm.nextFollowAt" type="datetime" placeholder="选择跟进时间" style="width: 100%" value-format="timestamp" />
+          <el-date-picker v-model="leadForm.nextFollowAt" type="datetime" placeholder="选择跟进时间" format="YYYY-MM-DD HH:mm" value-format="x" style="width: 100%" />
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="leadForm.note" type="textarea" :rows="2" placeholder="来源细节、需求、沟通记录" maxlength="200" />
@@ -491,9 +491,8 @@
 const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Download, MagicStick } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import {
@@ -557,6 +556,7 @@ const errorLeads = ref('')
 const loadLeads = async () => {
   errorLeads.value = ''
   leadLoading.value = true
+  const seq = ++leadsSeq
   try {
     const res = await getLeads({
       page: leadPage.value, pageSize: leadPageSize,
@@ -564,18 +564,25 @@ const loadLeads = async () => {
       stage: leadStage.value || undefined,
       source: leadSource.value || undefined,
     })
+    if (seq !== leadsSeq) return
     leads.value = res?.list || []
     leadTotal.value = res?.total || 0
   } catch (e) {
+    if (seq !== leadsSeq) return
     errorLeads.value = e?.message || '数据加载失败，请稍后重试'
     leads.value = []
   } finally {
-    leadLoading.value = false
+    if (seq === leadsSeq) leadLoading.value = false
   }
 }
 
 const leadDialogOpen = ref(false)
+const leadFormRef = ref(null)
 const leadForm = reactive({ id: '', name: '', phone: '', source: 'natural', stage: 'new', intentLevel: 3, nextFollowAt: null, note: '', salesperson: '', studentId: '', status: '' })
+const leadRules = {
+  name: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
+  phone: [{ pattern: /^1\d{10}$/, message: '请输入11位有效手机号', trigger: 'blur' }],
+}
 const leadStudentOptions = ref([])
 
 const openLeadDialog = async (row) => {
@@ -590,10 +597,13 @@ const openLeadDialog = async (row) => {
     leadStudentOptions.value = []
   }
   leadDialogOpen.value = true
+  // 上次编辑残留的校验红字清空
+  nextTick(() => leadFormRef.value?.clearValidate())
 }
 
 const saveLead = async () => {
-  if (!leadForm.name) { ElMessage.warning('姓名不能为空'); return }
+  const valid = await leadFormRef.value?.validate().catch(() => false)
+  if (!valid) return
   try {
     if (leadForm.id) {
       await updateLead(leadForm.id, { ...leadForm })
@@ -696,15 +706,22 @@ const pipelineColumns = computed(() =>
   }))
 )
 
+// 请求序号：防止慢网下旧搜索/翻页响应后到覆盖新结果
+let leadsSeq = 0
+let pipelineSeq = 0
+
 const loadPipeline = async () => {
   pipelineLoading.value = true
+  const seq = ++pipelineSeq
   try {
     const res = await getLeads({ page: 1, pageSize: 100, keyword: leadKeyword.value || undefined, source: leadSource.value || undefined })
+    if (seq !== pipelineSeq) return
     pipelineAll.value = (res?.list || []).filter((l) => l.status !== 'lost')
   } catch (e) {
+    if (seq !== pipelineSeq) return
     pipelineAll.value = []
   } finally {
-    pipelineLoading.value = false
+    if (seq === pipelineSeq) pipelineLoading.value = false
   }
 }
 

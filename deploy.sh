@@ -37,9 +37,8 @@ fi
 
 # ─── 0.5 生产安全提示 ───
 if [ -z "$JWT_SECRET" ]; then
-  echo -e "${YELLOW}⚠ 未设置 JWT_SECRET。开发模式可用默认密钥；生产部署请先执行：${NC}"
-  echo -e "${YELLOW}    export JWT_SECRET=\$(openssl rand -hex 32)${NC}"
-  echo -e "${YELLOW}  （生产环境未设置时后端会拒绝启动）${NC}\n"
+  echo -e "${YELLOW}⚠ 未设置 JWT_SECRET。将以生产模式启动并自动生成强随机密钥，持久化到 backend/db/.jwt-secret（请随数据库一起备份）。${NC}"
+  echo -e "${YELLOW}    如需密钥可控/多实例共享，请先执行：export JWT_SECRET=\$(openssl rand -hex 32)${NC}\n"
 fi
 
 # ─── 1. 安装依赖 ───
@@ -66,7 +65,9 @@ echo -e "${GREEN}✓ 构建完成（由后端 :3001 托管，单入口）${NC}"
 # ─── 4. 停旧进程 + 启动 ───
 echo -e "\n${BOLD}━━━ [4/4] 启动服务 ━━━${NC}"
 bash stop-all.sh >/dev/null 2>&1 || true
-nohup node backend/server.js > backend.log 2>&1 &
+# NODE_ENV=production：一键部署即生产模式（家长免密登录默认关闭、CORS 按 CORS_ORIGINS 白名单）。
+# 开发调试请用 start-all.sh（不设 NODE_ENV），或在 .env 中显式 export PARENT_PHONE_LOGIN=true。
+NODE_ENV=production nohup node backend/server.js > backend.log 2>&1 &
 echo $! > backend.pid
 
 # 健康检查轮询（最多约 15 秒，兼容慢机器冷启动）

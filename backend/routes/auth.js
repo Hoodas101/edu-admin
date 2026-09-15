@@ -12,11 +12,16 @@ const { generateId, generateToken, success, fail, safeFail, getOpenId, escapeLik
 let _wxAccessToken = '';
 let _wxAccessTokenExpire = 0;
 
-// 兼容迁移：对外展示别名（活动中显示别名，不暴露真实姓名）
-try { db.prepare("ALTER TABLE users ADD COLUMN alias TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-try { db.prepare("ALTER TABLE teachers ADD COLUMN alias TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
-// 兼容迁移：员工自定义权限（JSON 数组，空则按角色默认）
-try { db.prepare("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT ''").run(); } catch (e) { /* 已存在 */ }
+// alias / permissions 列已收编至 migrations/011
+
+// 家长「手机号免密登录/自助注册」开关：
+// - 显式设置 PARENT_PHONE_LOGIN=true/false 时以设置为准；
+// - 未设置时：非生产环境默认开（兼容小程序家长端旧路径与冒烟测试），生产环境默认关，
+//   防止知道手机号即可免凭证登录任意家长账号（账号接管面）。
+// 微信一键登录（带 code）不受此开关影响，仍走 openid 路径。
+const PARENT_PHONE_LOGIN = process.env.PARENT_PHONE_LOGIN
+  ? process.env.PARENT_PHONE_LOGIN === 'true'
+  : process.env.NODE_ENV !== 'production';
 
 /**
  * POST /api/auth/upload/avatar — 上传个人头像（base64 → 本地文件）
@@ -77,8 +82,9 @@ router.post('/login', (req, res) => {
       }
     }
 
-    // 优先使用微信返回的 openid，否则使用手机号生成唯一标识
-    let openid = req.body.openid || (phone ? `phone_${phone}` : generateId('wx_'));
+    // openid 一律由服务端派生，绝不接受客户端自报：
+    // 旧版信任 body.openid，任何人构造 phone_<手机号> 或已知 wx 标识即可免凭证命中他人账号（鉴权绕过）
+    let openid = phone ? `phone_${phone}` : generateId('wx_');
 
     // 查找或创建用户
     let user = db.prepare('SELECT * FROM users WHERE openid = ?').get(openid);
@@ -90,13 +96,17 @@ router.post('/login', (req, res) => {
     }
 
     if (!user) {
-      // 凭证登录：手机号未匹配到账号，说明未开通
+      // 凭证登录：统一返回"手机号或密码错误"，不区分"账号不存在/未设密码/密码错误"，
+      // 否则攻击者可用错误文案差异枚举哪些员工手机号已开通（账号存在性 oracle）
       if (isCredential) {
-        return res.status(403).json(safeFail('该手机号未开通登录权限，请联系机构在后台配置后登录'));
+        return res.status(403).json(safeFail('手机号或密码错误'));
       }
       // 无密码路径：仅家长可自助注册
       if (requestedRole !== 'parent') {
-        return res.status(403).json(safeFail(`该手机号未开通${roleLabel}身份，请联系机构在后台配置后登录`));
+        return res.status(403).json(safeFail('手机号或密码错误'));
+      }
+      if (!PARENT_PHONE_LOGIN) {
+        return res.status(403).json(safeFail('家长免密注册已关闭，请联系管理员开通账号或使用微信登录'));
       }
       // 家长：手机号即注册（保持原有能力）
       const userId = generateId('user_');
@@ -118,11 +128,12 @@ router.post('/login', (req, res) => {
       // 凭证登录：角色由服务端权威判定，不校验客户端声明的角色是否匹配
       if (isCredential) {
         if (!user.password) {
-          return res.status(403).json(safeFail('该账号未设置密码，请使用微信一键登录'));
+          // 与"密码错误"同文案：不向攻击者泄露该账号是否设置过密码
+          return res.status(403).json(safeFail('手机号或密码错误'));
         }
         const pwdResult = verifyPassword(password, user.password);
         if (!pwdResult.valid) {
-          return res.status(403).json(safeFail('密码错误，请重新输入'));
+          return res.status(403).json(safeFail('手机号或密码错误'));
         }
         // 旧版 SHA-256 哈希自动升级为 bcrypt
         if (pwdResult.needsUpgrade) {
@@ -135,6 +146,9 @@ router.post('/login', (req, res) => {
         // 若不作角色限制：空密码 + 声明与账号相同的角色即可跳过密码校验，
         // 任何人知道管理员/教练手机号都能直接登录其账号（鉴权绕过）。
         return res.status(403).json(safeFail('员工账号请使用密码登录'));
+      } else if (!PARENT_PHONE_LOGIN && phone) {
+        // 生产默认关闭：手机号免密即可登录家长账号，属账号接管面
+        return res.status(403).json(safeFail('家长免密登录已关闭，请输入密码或使用微信登录'));
       }
       // 手机号登录时，仅对历史「手机号身份」账号归一化 openid；
       // 微信身份（wx_ 前缀）保持不变，避免覆盖微信 openid 导致再次微信登录分裂账号
@@ -155,8 +169,8 @@ router.post('/login', (req, res) => {
       `).run(user.openid, phone, user.openid);
     }
 
-    // 生成 JWT Token
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role });
+    // 生成 JWT Token（tv = token_version，用于服务端吊销：停用/改密/降级后旧 Token 失效）
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
 
     res.json(success({
       openid: user.openid,
@@ -237,7 +251,7 @@ router.post('/wx-login', async (req, res) => {
       user.avatar = avatarUrl || user.avatar;
     }
 
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role });
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
     res.json(success({
       openid: user.openid,
       token,
@@ -354,7 +368,7 @@ router.post('/phone-login', async (req, res) => {
       user.avatar = avatarUrl;
     }
 
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role });
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
     res.json(success({
       openid: user.openid,
       token,
@@ -527,29 +541,55 @@ router.post('/updateProfile', (req, res) => {
         return res.status(400).json(safeFail('该手机号已被其他账号使用'));
       }
       const oldPhone = user.phone || '';
+      const oldOpenid = user.openid;
       finalPhone = phone;
       // 微信身份账号保留微信 openid（微信登录需继续匹配原账号），
       // 仅更新手机号；手机号身份账号（phone_ 前缀）随手机号更新 openid
       const isWechatIdentity = String(user.openid || '').startsWith('wx_');
-      if (isWechatIdentity) {
-        db.prepare('UPDATE users SET phone = ?, updated_at = ? WHERE id = ?')
-          .run(phone, now(), user.id);
-      } else {
-        finalOpenid = `phone_${phone}`;
-        db.prepare('UPDATE users SET phone = ?, openid = ?, updated_at = ? WHERE id = ?')
-          .run(phone, finalOpenid, now(), user.id);
-      }
+      if (!isWechatIdentity) finalOpenid = `phone_${phone}`;
 
-      // 同步教师档案手机号（教练）
-      if (user.role === 'coach' && oldPhone) {
-        db.prepare('UPDATE teachers SET phone = ? WHERE phone = ?').run(phone, oldPhone);
-      }
-      // 同步家长绑定关系（家长）
-      db.prepare(`
-        UPDATE parent_bindings
-        SET parent_openid = ?, parent_phone = ?
-        WHERE parent_openid = ?
-      `).run(finalOpenid, phone, user.openid);
+      // openid 变更时，历史数据全部跟随账号迁移（同事务）：
+      // 旧实现只迁 parent_bindings，订单/通知/请假/反馈等按 openid 归属，改号后成孤儿——
+      // 家长改手机号后「我的订单」清空、历史通知失联。
+      db.transaction(() => {
+        if (isWechatIdentity) {
+          db.prepare('UPDATE users SET phone = ?, updated_at = ? WHERE id = ?')
+            .run(phone, now(), user.id);
+          // 微信身份 openid 不变：家长绑定里的 parent_phone 仍需刷新
+          db.prepare('UPDATE parent_bindings SET parent_phone = ? WHERE parent_openid = ?')
+            .run(phone, oldOpenid);
+        } else {
+          db.prepare('UPDATE users SET phone = ?, openid = ?, updated_at = ? WHERE id = ?')
+            .run(phone, finalOpenid, now(), user.id);
+          if (finalOpenid !== oldOpenid) {
+            const mig = [
+              "UPDATE parent_bindings SET parent_openid = ?, parent_phone = ? WHERE parent_openid = ?",
+              "UPDATE orders SET user_id = ? WHERE user_id = ?",
+              "UPDATE payments SET user_id = ? WHERE user_id = ?",
+              "UPDATE notifications SET user_id = ? WHERE user_id = ?",
+              "UPDATE notification_reads SET user_id = ? WHERE user_id = ?",
+              "UPDATE feedback SET user_id = ? WHERE user_id = ?",
+              "UPDATE leave_requests SET parent_openid = ? WHERE parent_openid = ?",
+              "UPDATE trial_bookings SET parent_openid = ? WHERE parent_openid = ?",
+              "UPDATE subscribe_msg_logs SET openid = ? WHERE openid = ?",
+              "UPDATE teachers SET user_id = ? WHERE user_id = ?",
+            ];
+            const args = {
+              parent_bindings: [finalOpenid, phone, oldOpenid],
+              default: [finalOpenid, oldOpenid],
+            };
+            for (const sql of mig) {
+              const key = sql.includes('parent_phone') ? 'parent_bindings' : 'default';
+              try { db.prepare(sql).run(...args[key]); } catch (e) { /* 列不存在等异常跳过该表 */ }
+            }
+          }
+        }
+
+        // 同步教师档案手机号（教练）
+        if (user.role === 'coach' && oldPhone) {
+          db.prepare('UPDATE teachers SET phone = ? WHERE phone = ?').run(phone, oldPhone);
+        }
+      })();
     }
 
     // 昵称 / 头像
@@ -585,7 +625,7 @@ router.post('/updateProfile', (req, res) => {
     res.json(success({
       openid: finalOpenid,
       // openid 可能因手机号变更而改变；重新签发 JWT，避免旧 token 的 openid 失效导致后续请求身份错乱
-      token: generateToken({ openid: finalOpenid, userId: user.id, role: user.role }),
+      token: generateToken({ openid: finalOpenid, userId: user.id, role: user.role, tv: user.token_version || 0 }),
       userId: user.id,
       role: user.role,
       nickname: cleanNickname,
@@ -609,7 +649,8 @@ router.post('/changePassword', (req, res) => {
     const openid = getOpenId(req);
     if (!openid) return res.status(401).json(safeFail('未登录'));
 
-    const user = db.prepare("SELECT * FROM users WHERE openid = ? AND role IN ('admin','coach')").get(openid);
+    // 员工三角色（管理员/教练/销售）均需自助改密；此前漏了 sales，销售无法改初始密码
+    const user = db.prepare("SELECT * FROM users WHERE openid = ? AND role IN ('admin','coach','sales')").get(openid);
     if (!user) return res.status(403).json(safeFail('当前账号无需设置密码'));
 
     const pwdResult = verifyPassword(oldPassword || '', user.password || '');
@@ -620,9 +661,15 @@ router.post('/changePassword', (req, res) => {
       return res.status(400).json(safeFail('新密码需为 6-20 位'));
     }
 
-    db.prepare('UPDATE users SET password = ?, updated_at = ? WHERE id = ?')
+    // 改密同时 bump token_version：使该账号其他设备的旧 Token 立即失效；
+    // 并为当前会话签发新 Token 返回，避免自己也被登出。
+    db.prepare('UPDATE users SET password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE id = ?')
       .run(hashPassword(newPassword), now(), user.id);
-    res.json(success({ updated: true }));
+    const freshUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    res.json(success({
+      updated: true,
+      token: generateToken({ openid: freshUser.openid, userId: freshUser.id, role: freshUser.role, tv: freshUser.token_version || 0 }),
+    }));
   } catch (err) {
     console.error('[changePassword]', err);
     res.status(500).json(safeFail('修改密码失败，请稍后重试'));

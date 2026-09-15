@@ -48,6 +48,14 @@ const wxpayRoutes = require('./routes/wxpay');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// 反向代理支持：nginx/Caddy 之后 req.ip 恒为 127.0.0.1，会让限流键共享、审计 IP 失真。
+// 通过 TRUST_PROXY 环境变量设置可信跳数（常见 1；多层代理按需调大），仅信任直连跳数、
+// 避免 X-Forwarded-For 伪造。本地直连部署保持默认（不设 = 不信任任何代理头）。
+if (process.env.TRUST_PROXY) {
+  const hops = parseInt(process.env.TRUST_PROXY);
+  app.set('trust proxy', Number.isInteger(hops) && hops > 0 ? hops : true);
+}
+
 // CORS（限制来源）— 必须放在限流与认证之前，确保预检请求带正确响应头
 // 生产环境通过 CORS_ORIGINS 环境变量配置允许的来源（逗号分隔），如：
 //   export CORS_ORIGINS=https://admin.example.com,https://www.example.com
@@ -116,6 +124,25 @@ app.use((req, res, next) => {
     const token = authHeader.slice(7);
     const payload = verifyToken(token);
     if (payload && payload.openid) {
+      // token_version 吊销校验：停用/改密/降级后 bump 计数，旧 Token 立即失效。
+      // 行不存在（openid 已轮换 / 账号已删除）同样视为吊销 —— 旧版 u && 短路会放行
+      // 无对应用户行的 Token，令冻结角色最长存活 7 天，架空整条吊销链。
+      // 兜底：查询本身抛异常（库忙等）时放行，不因读库异常把全员踢下线。
+      try {
+        const u = db.prepare('SELECT token_version, status FROM users WHERE openid = ?').get(payload.openid);
+        if (!u) {
+          return res.status(401).json({ code: 401, data: null, message: '登录状态已失效，请重新登录' });
+        }
+        // 仅对显式非 active 的账号拒绝（历史行可能无 status 值）
+        if (u.status && u.status !== 'active') {
+          return res.status(401).json({ code: 401, data: null, message: '账号已停用，请联系管理员' });
+        }
+        if ((u.token_version || 0) !== (payload.tv || 0)) {
+          return res.status(401).json({ code: 401, data: null, message: '登录状态已失效，请重新登录' });
+        }
+      } catch (e) {
+        console.error('[auth token_version]', e.message);
+      }
       req.openid = payload.openid;
       req.userRole = payload.role;
       return next();
@@ -125,9 +152,9 @@ app.use((req, res, next) => {
   return res.status(401).json({ code: 401, data: null, message: '未登录或登录已过期' });
 });
 
-// 登录接口限流：默认 500 次/15 分钟/IP（可用 LOGIN_RATE_LIMIT 环境变量收紧；生产环境建议调低）
+// 登录接口限流：默认 100 次/15 分钟/IP（可用 LOGIN_RATE_LIMIT 环境变量调整）
 const loginAttempts = new Map();
-const LOGIN_RATE_LIMIT = parseInt(process.env.LOGIN_RATE_LIMIT) || 500;
+const LOGIN_RATE_LIMIT = parseInt(process.env.LOGIN_RATE_LIMIT) || 100;
 const LOGIN_RATE_WINDOW = 15 * 60 * 1000;
 app.use('/api/auth/login', (req, res, next) => {
   const ip = req.ip || req.connection.remoteAddress;
@@ -152,9 +179,16 @@ app.get(/^\/(?!api\/|assets\/|favicon\.ico).*/, (req, res) => {
   res.sendFile(path.join(__dirname, '../web-admin/dist/index.html'));
 });
 
-// 健康检查
+// 健康检查：附带 DB 探测。进程活着但库坏了（磁盘满/文件损坏）时，
+// 必须报 503，否则 Docker/pm2 健康检查误判为健康、流量继续打到死库。
 app.get('/api/health', (req, res) => {
-  res.json({ code: 0, data: { status: 'ok', time: Date.now() }, message: '服务运行正常' });
+  try {
+    db.prepare('SELECT 1').get();
+    res.json({ code: 0, data: { status: 'ok', time: Date.now() }, message: '服务运行正常' });
+  } catch (e) {
+    console.error('[health] DB 探测失败:', e.message);
+    res.status(503).json({ code: 503, data: { status: 'db_error', time: Date.now() }, message: '数据库不可用' });
+  }
 });
 
 // API 路由
@@ -216,9 +250,16 @@ server.on('error', (err) => {
   }
 });
 
-// 进程级错误兜底：未捕获异常 / 未处理 Promise 拒绝，仅记录不退出，避免单体服务整体崩溃
+// 进程级错误兜底：
+// - 测试环境（NODE_ENV=test）：仅记录不退出，保证进程内 require('../server') 的测试套件继续跑；
+// - 生产环境：未捕获异常后进程状态不可信（可能半写入/坏连接），记录后退出，
+//   由 pm2 / docker restart 拉起干净实例。静默续跑会让坏状态持续服务、放大故障。
 process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err && err.stack ? err.stack : err);
+  if (process.env.NODE_ENV !== 'test') {
+    process.exitCode = 1;
+    setTimeout(() => process.exit(1), 500).unref();
+  }
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);

@@ -249,25 +249,31 @@ router.post('/:id/members', (req, res) => {
     const ids = Array.isArray(req.body.studentIds) ? req.body.studentIds : [];
     if (!ids.length) return res.json(fail('请选择要加入的学员'));
 
-    // 容量校验（max_members>0 时）
+    // 容量校验与批量加入在同一事务内：逐条读-改-写分离时，
+    // 中途异常会留下「一半学员已入班」的中间态
     let added = 0;
     const t = now();
     const ins = db.prepare(`
       INSERT OR IGNORE INTO class_members (id, class_id, student_id, role, joined_at)
       VALUES (?, ?, ?, 'member', ?)
     `);
-    const current = db.prepare('SELECT COUNT(*) c FROM class_members WHERE class_id = ?').get(req.params.id).c;
-    for (const sid of ids) {
-      if (!sid) continue;
-      const stu = db.prepare('SELECT id FROM students WHERE id = ?').get(sid);
-      if (!stu) continue;
-      if (cls.max_members > 0 && (current + added) >= cls.max_members) {
-        return res.json(fail(`班级容量已满（上限 ${cls.max_members} 人）`));
+    db.transaction(() => {
+      const current = db.prepare('SELECT COUNT(*) c FROM class_members WHERE class_id = ?').get(req.params.id).c;
+      for (const sid of ids) {
+        if (!sid) continue;
+        const stu = db.prepare('SELECT id FROM students WHERE id = ?').get(sid);
+        if (!stu) continue;
+        if (cls.max_members > 0 && (current + added) >= cls.max_members) {
+          const err = new Error(`班级容量已满（上限 ${cls.max_members} 人）`);
+          err.code = 'CLASS_FULL';
+          throw err;
+        }
+        added += ins.run(generateId('cm_'), req.params.id, sid, t).changes;
       }
-      added += ins.run(generateId('cm_'), req.params.id, sid, t).changes;
-    }
+    })();
     res.json(success({ added, classId: req.params.id }));
   } catch (err) {
+    if (err && err.code === 'CLASS_FULL') return res.json(fail(err.message));
     console.error('[class members add]', err);
     res.status(500).json(safeFail('添加班级成员失败'));
   }

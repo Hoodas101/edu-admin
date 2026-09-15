@@ -8,8 +8,8 @@ name: Deploy
 #      工作流通过 SSH 连接服务器（私钥来自仓库 Secrets 中的 SSH_PRIVATE_KEY）。
 #   2. 服务器上：缺 Docker 则自动安装 → 克隆本仓库 → 执行 ./deploy/deploy.sh
 #      （构建镜像、启动应用、初始化 SQLite 架构、可选灌示例数据）。
-#   3. 完成后管理后台即在 http://<host>/ 可访问（勾选 HTTPS 并给真实域名
-#      则为 https://）。
+#   3. 完成后管理后台即在 http://<host>:3001/ 可访问（勾选 HTTPS 并给真实域名
+#      则为 https://<域名>/）。
 #
 # 一次性设置：
 #   - 准备一台全新的 Ubuntu 22.04/24.04 服务器，开通 SSH root 访问。
@@ -40,9 +40,9 @@ on:
         default: false
         type: boolean
       seed_demo_data:
-        description: 灌入示例数据（管理员 13800000001 / 123456）
+        description: 灌入示例数据（管理员 13800000001 / 123456）——仅在空库时生效；已有生产数据的服务器重跑部署不会清库
         required: false
-        default: true
+        default: false
         type: boolean
 
 jobs:
@@ -86,4 +86,4 @@ jobs:
         run: |
           PROTO="http"
           if [ "${{ inputs.use_https }}" = "true" ]; then PROTO="https"; fi
-          echo "::notice title=部署完成::星课 StarClass 已上线 $PROTO://${{ inputs.server_host }}/ —— 管理员 13800000001 / 123456（登录后请改密）"
+          echo "::notice title=部署完成::星课 StarClass 已上线 $PROTO://${{ inputs.server_host }}/ —— 若本次为全新空库部署且开启了示例数据，管理员为 13800000001 / 123456；存量库沿用原有账号（登录后请改密）"

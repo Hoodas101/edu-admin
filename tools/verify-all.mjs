@@ -20,7 +20,7 @@ const run = (cmd, args, cwd = root) => {
 
 const suites = [
   { name: '测试数据卫生检查', fn: () => run('node', ['tools/data-hygiene.mjs']) },
-  { name: '冒烟测试（33 项）', fn: () => run('node', ['smoke-test.mjs']) },
+  { name: '冒烟测试（39 项）', fn: () => run('node', ['smoke-test.mjs']) },
   { name: '管理端 API 全流程（30 项）', fn: () => run('node', ['tools/admin-api-flow.mjs']) },
   { name: '业务剧本（全链路 21 项）', fn: () => run('node', ['tools/business-flow-test.mjs']) },
   { name: '双计费模式（时效/次数 14 项）', fn: () => run('node', ['tools/billing-mode-test.mjs']) },

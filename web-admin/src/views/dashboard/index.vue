@@ -223,9 +223,8 @@ import {
 import { CanvasRenderer } from 'echarts/renderers'
 echarts.use([LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, TitleComponent, CanvasRenderer])
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { UserFilled } from '@element-plus/icons-vue'
+import { UserFilled, CaretTop, CaretBottom } from '@element-plus/icons-vue'
 import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollowUpsToday, completeFollowUp } from '@/api/modules'
 import { relativeTime } from '@/utils/format'
 import StatusDot from '@/components/StatusDot.vue'
@@ -394,6 +393,11 @@ const loadCharts = async () => {
   } catch (e) {
     chartData.value = { attendanceTrend: { labels: [], data: [] }, revenueTrend: { labels: [], current: [], prev: [] }, courseDist: [], productSales: [] }
   }
+  // 重建前先销毁旧实例：否则同一 DOM 反复 echarts.init 会累积实例造成内存泄漏
+  //（切换 本周/本月 周期、主题切换都走这里，统一在入口 dispose）
+  if (attendanceChart) { attendanceChart.dispose(); attendanceChart = null }
+  if (revenueChart) { revenueChart.dispose(); revenueChart = null }
+  if (productDonut) { productDonut.dispose(); productDonut = null }
   initAttendanceChart()
   initRevenueChart()
   initProductDonut()

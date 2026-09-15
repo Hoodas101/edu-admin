@@ -24,7 +24,7 @@
     <!-- 员工表格 -->
     <div class="card table-container">
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadStaff" />
-      <el-table v-else :data="pagedStaff" row-class-name="clickable-row" @row-click="openDetailDrawer" size="small" empty-text="暂无员工">
+      <el-table v-else v-loading="loading" :data="pagedStaff" row-class-name="clickable-row" @row-click="openDetailDrawer" size="small" empty-text="暂无员工">
         <el-table-column label="姓名" min-width="100">
           <template #default="{ row }">
             <span class="staff-name">{{ row.name }}</span>
@@ -216,7 +216,6 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, UserFilled, Download, InfoFilled } from '@element-plus/icons-vue'
 import { getTeachers, addTeacher, updateTeacher, deleteTeacher } from '@/api/modules'
 import dayjs from 'dayjs'

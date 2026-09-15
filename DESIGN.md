@@ -27,7 +27,7 @@
 | Accent | `#0071e3` | `#0A84FF` | `--t-accent` |
 | Accent Strong | hover/按下加深 | `#409CFF` | `--t-accent-strong` |
 | Accent BG | 蓝 8% 浅底 | 蓝 16% 深底 | `--t-accent-bg` |
-| Accent Line | 蓝 30% 边 | 蓝 36% 边 | `--t-accent-line` |
+| Accent Line | 蓝 24% 边 | 蓝 36% 边 | `--t-accent-line` |
 
 ### 表面与线条
 | 角色 | 浅色 | 深色 | 变量 |
@@ -36,7 +36,7 @@
 | BG Alt（表头/隔行） | `#FAFAFA` | `#15151A` | `--t-bg-alt` |
 | Surface（卡片） | `#FFFFFF` | `#17171C` | `--t-surface` |
 | Surface Hover | `#F5F5F7` | `#1F1F26` | `--t-surface-hover` |
-| Surface Strong | `#E8E8ED` | `#26262E` | `--t-surface-strong` |
+| Surface Strong | `#F0F0F2` | `#26262E` | `--t-surface-strong` |
 | Line | `#E8E8ED` | `#2A2A33` | `--t-line` |
 | Line Strong | `#D2D2D7` | `#3A3A44` | `--t-line-strong` |
 
@@ -44,7 +44,7 @@
 | 角色 | 浅色 | 深色 | 变量 |
 |------|------|------|------|
 | Text 1（标题/主） | `#1D1D1F` | `#F5F5F7` | `--t-text-1` |
-| Text 2（正文/次） | `#515154` | `#B9B9BF` | `--t-text-2` |
+| Text 2（正文/次） | `#6E6E73` | `#B9B9BF` | `--t-text-2` |
 | Text 3（辅助） | `#86868B` | `#8E8E94` | `--t-text-3` |
 | Text Faint（占位） | `#AEAEB2` | `#6E6E76` | `--t-text-faint` |
 
@@ -54,7 +54,7 @@
 | Success | `#34C759` 系 | `#30D158` | `--t-success` |
 | Warning | `#FF9500` | `#FF9F0A` | `--t-warning` |
 | Danger | `#FF3B30` | `#FF453A` | `--t-danger` |
-| Info | `#8E8E93` | `#98989F` | `--t-info` |
+| Info | `#6E6E73` | `#98989F` | `--t-info` |
 
 浅底标签统一用 `color-mix(in srgb, var(--t-success) 12%, transparent)` 模式派生，禁止另起一套半透明常量。
 
@@ -78,16 +78,16 @@ classFallback() / courseTextColor()` 取 token，并靠 `themeTick`（`utils/the
 
 ## 4. 字体与排版
 
-- Font Family：`-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif`
+- Font Family：`-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Geist', 'Noto Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif`
 - 数字一律 `font-variant-numeric: tabular-nums`。
 - 字重只用 400 / 500 / 600 / 700。
-- 字阶 token：`--t-fs-2xs .. --t-fs-3xl`（11 → 30px 体系），页面禁止游离字号。
+- 字阶 token：`--t-fs-2xs .. --t-fs-3xl`（11 → 28px 体系，另有 --t-fs-4xl 34px 用于大数字），页面禁止游离字号。
 - 行高：正文 1.5、长文 1.7、大数字 1.1。
 
 ## 5. 布局与组件
 
-- **间距 token**：`--t-spacing-sm/md/lg/xl/2xl`（8/12/16/24/32）。
-- **圆角**：控件 `--t-radius-sm`(6) / 卡片 `--t-radius-card`(12) / 弹窗 `--t-radius-lg`。同页不混搭。
+- **间距 token**：`--t-spacing-xs/sm/md/lg/xl/2xl`（4/8/16/24/32/48）。
+- **圆角**：微小片 `--t-radius-sm`(4) / 控件 `--t-radius-md`(8) / 卡片 `--t-radius-card`(12) / 弹窗 `--t-radius-lg`。同页不混搭。
 - **阴影**：`--t-card-shadow` 单层极轻；深色主题阴影加深、抬依赖面亮度差而非投影。
 - **列表/表格**：表头底 `--t-bg-alt`；行 hover `--t-hover-bg`；斑马纹同用 alt。
 - **状态展示**：统一 `<StatusDot>`（tone: success/warning/danger/neutral）与 `<EntityAvatar>`（tone-* 用 color-mix 浅底）；页面不再自造彩色徽标。
@@ -95,7 +95,7 @@ classFallback() / courseTextColor()` 取 token，并靠 `themeTick`（`utils/the
 
 ## 6. 交互与动效
 
-- 过渡 ≤ 200ms，曲线 `cubic-bezier(0.16, 1, 0.3, 1)`；禁 `transition: all`。
+- 过渡 ≤ 280ms（页面级）/ 常规 ≤ 200ms，曲线 `cubic-bezier(0.23, 1, 0.32, 1)`；禁 `transition: all`。
 - 入场仅 `fade + translateY(8px)`，禁 `scale(0)`。
 - 必须兜底 `@media (prefers-reduced-motion: reduce)`。
 - 危险操作二次确认（`ElMessageBox`），导出操作弹窗确认时间范围。

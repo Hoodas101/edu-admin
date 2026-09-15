@@ -99,7 +99,6 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { getLeaves, approveLeave } from '@/api/modules'

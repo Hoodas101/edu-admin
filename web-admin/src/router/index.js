@@ -1,4 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { hasPageAccess, permsFromStorage } from '@/utils/access'
 
 // 路由配置
 const routes = [
@@ -29,7 +31,7 @@ const routes = [
         path: 'students',
         name: 'Students',
         component: () => import('@/views/hubs/StudentsHub.vue'),
-        meta: { title: '{learner}档案', icon: 'User', roles: ['admin', 'coach', 'sales', 'parent'], perm: 'students' }
+        meta: { title: '{learner}档案', icon: 'User', roles: ['admin', 'coach', 'sales'], perm: 'students' }
       },
       {
         path: 'sales',
@@ -65,7 +67,9 @@ const routes = [
       { path: 'growth', redirect: '/sales?tab=growth' },
       { path: 'feedback', redirect: '/parents?tab=feedback' },
       { path: 'notifications', redirect: '/parents?tab=notifications' },
-      { path: 'coach-stats', redirect: '/staff?tab=coachstats' }
+      { path: 'coach-stats', redirect: '/staff?tab=coachstats' },
+      // 404 兜底：未匹配路径（含手输错地址）回数据看板，由守卫按权限再分流
+      { path: '/:pathMatch(.*)*', name: 'NotFound', redirect: '/dashboard' }
     ]
   }
 ]
@@ -88,24 +92,19 @@ router.beforeEach((to, from, next) => {
   if (to.meta.public) {
     // 公开路由直接放行
     next()
-  } else if (token && (role === 'admin' || role === 'coach' || role === 'sales' || role === 'parent')) {
-    // 已登录用户：按角色或自定义功能权限放行
-    let perms = []
-    try {
-      perms = JSON.parse(localStorage.getItem('edu_user_info') || '{}').permissions || []
-    } catch (e) { perms = [] }
-    const allowed = role === 'admin'
-      || (to.meta.roles || []).includes(role)
-      || (Array.isArray(perms) && to.meta.perm && perms.includes(to.meta.perm))
-      || role === 'parent'  // 家长可访问所有页面（只读）
-    if (allowed) {
+  } else if (token && (role === 'admin' || role === 'coach' || role === 'sales')) {
+    // 已登录用户：与侧栏菜单共用 hasPageAccess 判定（角色或自定义功能权限）
+    // 注意：不再对 parent 无条件放行——家长端走微信小程序，管理后台面向机构员工；
+    // 此前 parent 兜底可直达 /settings 等所有页面壳（URL 直达绕过菜单隐藏）
+    if (hasPageAccess(role, permsFromStorage(), to.meta)) {
       next()
     } else {
-      // 无权限：回各自默认页
-      next(role === 'coach' ? '/schedule' : role === 'parent' ? '/students' : '/dashboard')
+      // 无权限：回各自默认页。带明确提示，避免掉线重登跳到无权限页时被"静默弹回"误认为页面坏了
+      ElMessage.warning(`没有访问「${to.meta.title || '该页面'}」的权限，已返回主页`)
+      next(role === 'coach' ? '/schedule' : '/dashboard')
     }
   } else {
-    // 未登录跳转登录页
+    // 未登录（或家长/未知角色会话）跳转登录页
     next('/login')
   }
 })

@@ -1,6 +1,6 @@
 {
   "name": "edu-admin-backend",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "管理系统后端 — Node.js + Express + SQLite（完全免费）",
   "main": "server.js",
   "scripts": {
@@ -22,5 +22,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
   }
 }

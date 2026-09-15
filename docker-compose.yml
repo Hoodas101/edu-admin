@@ -13,9 +13,11 @@ services:
     build: .
     image: starclass-edu-admin
     ports:
-      - "3001:3001"
+      # 宿主机端口可用 APP_PORT 覆盖（deploy.sh --port 即透传此变量），容器内固定 3001
+      - "${APP_PORT:-3001}:3001"
     environment:
-      # 容器内强制生产模式（未设 JWT_SECRET 会拒绝启动）
+      # 容器内强制生产模式；未设 JWT_SECRET 时自动生成随机密钥存入数据卷
+      # （多实例部署请显式设置共享的 JWT_SECRET）
       NODE_ENV: production
       # SQLite 放在命名卷上，容器重建不丢数据
       DB_PATH: /data/data.db

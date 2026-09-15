@@ -8,7 +8,7 @@
 ## 方式一：GitHub Actions 点击部署（推荐新手）
 
 1. 买一台全新的 Linux 服务器（任意厂商的 Ubuntu 22.04/24.04 虚机即可，
-   1 核 1G 起步够用），开通 SSH root 访问。
+   1 核 2G 起步够用），开通 SSH root 访问。
 2. 把 SSH **私钥**添加到仓库：
    `Settings → Secrets and variables → Actions → New repository secret`，
    命名为 `SSH_PRIVATE_KEY`，粘贴能登录该服务器 root 的私钥。
@@ -16,9 +16,9 @@
    填入服务器公网 IP（或已解析到服务器的域名），点击运行。
 
 工作流会自动：装 Docker（如缺失）→ 克隆本仓库 → 构建镜像 → 初始化
-SQLite → 启动服务。完成后管理后台就在 `http://<服务器IP>/`。
-如果填的是真实域名并勾选 **Automatic HTTPS**，会自动签发 Let's Encrypt
-证书，直接得到 `https://`。
+SQLite → 启动服务。勾选 **Automatic HTTPS** 并填真实域名时，管理后台在
+`https://<域名>/`；未勾选 HTTPS（默认）时服务在 **`http://<服务器IP>:3001/`**
+（80 端口未启用）。
 
 以后再次部署 = 再点一次 Run workflow —— SQLite 数据卷与上传文件都保留。
 

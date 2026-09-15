@@ -12,7 +12,17 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../db');
 
-const BACKUP_DIR = path.join(__dirname, '..', 'backups');
+// 备份目录跟随 DB_PATH 所在目录：
+// Docker/自定义数据目录下，备份与数据库同落一个卷，重建容器不丢备份
+// （旧实现固定 backend/backups，容器内属可写层，README「数据可恢复」卖点失效）。
+const DB_PATH = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.join(__dirname, '..', 'db', 'data.db');
+const BACKUP_DIR = path.join(path.dirname(DB_PATH), 'backups');
+
+// 备份文件统一前缀（backup_ 为定时/手动备份；restore-backup- 为整库还原前的安全网备份）
+const BACKUP_PREFIXES = ['backup_', 'restore-backup-'];
+const isBackupFile = (f) => f.endsWith('.db') && BACKUP_PREFIXES.some((p) => f.startsWith(p));
 
 // 确保备份目录存在
 if (!fs.existsSync(BACKUP_DIR)) {
@@ -72,7 +82,7 @@ function cleanOldBackups() {
   const retention = Math.max(1, config.retention || 30);
 
   const files = fs.readdirSync(BACKUP_DIR)
-    .filter(f => f.startsWith('backup_') && f.endsWith('.db'))
+    .filter(isBackupFile)
     .map(f => ({
       name: f,
       path: path.join(BACKUP_DIR, f),
@@ -98,7 +108,7 @@ function listBackups() {
   const dir = BACKUP_DIR;
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir)
-    .filter(f => f.startsWith('backup_') && f.endsWith('.db'))
+    .filter(isBackupFile)
     .map(f => {
       const stat = fs.statSync(path.join(dir, f));
       return {
@@ -114,10 +124,16 @@ function listBackups() {
  * 删除指定备份
  */
 function deleteBackup(filename) {
+  // 文件名白名单：仅接受本系统生成的 backup_<时间戳>.db / restore-backup-<时间戳>.db 格式，
+  // 防止 ../ 遍历或与备份目录同前缀的兄弟目录（startsWith 单独判断挡不住）
+  if (typeof filename !== 'string' || !/^(backup_[\w-]+|restore-backup-[\w-]+)\.db$/.test(filename)) throw new Error('非法路径');
   const filepath = path.join(BACKUP_DIR, filename);
-  if (!filepath.startsWith(BACKUP_DIR)) throw new Error('非法路径');
-  if (!fs.existsSync(filepath)) throw new Error('备份文件不存在');
-  fs.unlinkSync(filepath);
+  const resolved = path.resolve(filepath);
+  if (resolved !== path.resolve(BACKUP_DIR, filename) || !resolved.startsWith(path.resolve(BACKUP_DIR) + path.sep)) {
+    throw new Error('非法路径');
+  }
+  if (!fs.existsSync(resolved)) throw new Error('备份文件不存在');
+  fs.unlinkSync(resolved);
   return true;
 }
 
@@ -159,7 +175,8 @@ function startScheduledBackup() {
     setTimeout(() => {
       const cfg = getBackupConfig();
       if (cfg.enabled) {
-        createBackup();
+        // createBackup 内部已捕获，此处再兜一层，防止定时器回调里出现未处理拒绝
+        Promise.resolve(createBackup()).catch(e => console.error('[Backup] 定时备份异常:', e.message));
       }
       scheduleNext();
     }, delay);
