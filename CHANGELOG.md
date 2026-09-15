@@ -36,109 +36,38 @@
 
 ## [1.0.1] - 2026-09-15
 
-多视角深度审计（机构管理者 / 教练 / 销售 / 家长 / 工程师 / 设计师）后的四批修复，
-以及两轮对抗性复审（pass 6 / pass 7）的追加修复。
+Stability, correctness and security fixes from a full-codebase review.
 
-### 安全 Security
+### Security
 
-- 家长手机号免密登录改为环境变量开关 `PARENT_PHONE_LOGIN`（生产默认关闭），
-  堵住账号接管面；微信一键登录路径不受影响
-- JWT 增加 `token_version` 吊销链：停用 / 改密 / 角色变更 / 删除员工即时作废旧 Token
-  （全员需重新登录一次，为本次安全升级的预期代价）
-- 签到套利修复：家长扫码补报名校验、次数卡扣课、QR nonce 验证
-- 越权修复：排期 PUT 归属校验、他人学员名册裁剪、/charts 权限、微信支付订单归属、
-  `INSERT OR REPLACE` 覆盖支付记录去除
-- 部署安全：seed 三重守卫（`seed.js` 非空库需 `--force`、`deploy/deploy.sh` 检测
-  有数据即跳过、Deploy 工作流 `seed_demo_data` 默认 false）——重跑部署不再清空生产库；
-  `remote-deploy.sh` 保留 `.env`（JWT_SECRET 不再随重部署重置全员掉线）
+- Add a `token_version` revocation chain to JWT: disabling / password change / role change / staff deletion now invalidates old tokens immediately. Every user signs in once after upgrade (expected cost of this hardening)
+- Treat a missing `users` row (rotated openid / deleted account) as revoked instead of letting an ownerless token through for up to 7 days
+- Gate parent phone password-free login behind `PARENT_PHONE_LOGIN` (off by default in production); WeChat one-tap login is unaffected
+- `deploy.sh` starts the backend with `NODE_ENV=production`, so the "off in production" default actually applies; fix the `JWT_SECRET` hint to match real behavior (auto-generate a random key and persist it)
+- Close the check-in arbitrage path: parent QR sign-in now verifies enrollment, deducts classes from count cards, and enforces a time window
+- Fix authorization gaps: schedule PUT ownership check, trim other students' rosters, gate `/charts` by permission, verify WeChat Pay order ownership, drop `INSERT OR REPLACE` payment overwrite
+- Harden the login redirect against cross-origin forms (`/\evil.com`)
 
-### 修复 Fixed
+### Fixed
 
-- 财务口径统一：summary/monthly/by-product/by-sales 收入均改计 `status IN ('paid','refunded')`
-  且排除 `order_type='refund'` 流水行 —— 修复全额退款订单（status 翻转）收入消失、
-  退款照扣导致的净收入双扣为负，以及两套报表互相矛盾；新增离线回归套件
-  `tests/finance-refund-regression.cjs`（21 项，入 npm test 与 CI）
-- 退卡金额：按订单实付/原价比例折减整单折扣（原按标价退对折扣单超退），
-  并加「订单剩余额退度」硬上限（payable − 已退），与订单退款路径口径一致；
-  RFND 流水 order_no 补随机后缀（同毫秒连退两卡撞 UNIQUE 约束实测）
-- 资金正确性：退卡按 `unitPrice` 找价（原按 `price` 永不命中导致超退）、
-  退款金额上限与 refund_rules 复算、取消订单多步回滚入事务、会员编号漂移修复
-- 一致性：课时/积分/扣卡/分班等 12 处读改写补事务边界；备份目录跟随 `DB_PATH`
-  （Docker 卷内不再落可写层丢失）；health 加 `SELECT 1` 真实探测；
-  微信支付未配置时诚实失败而非假成功；`allow_self_booking` 开关落地
-- 薪资：新增 `POST /api/payroll/settle` 按月结算写入 `payroll_logs`
-  （财务净利润不再把课酬当 0 虚高），配套 /logs /void 与前端「确认结算 / 结算记录 / 作废」；
-  结算确认弹窗人数改按「金额 > 0 的教练」计（与后端跳过 0 元记录的口径一致，不再虚报）
-- 薪资结算流程可懂性：作废弹窗提示「该月剩余 N 条需全部作废方可重算」；月份列与页内
-  其它区域统一「2026年09月」格式；已作废记录结算时间显示「—」不再回落创建时间；
-  「净利润虚高」警示从灰色小字升级为独立 warning 提示条
-- 登录/掉线边角：`/login?redirect=/login` 不再停在登录页；并发 401 只提示跳转一次；
-  重登跳到无权限页时给出明确 toast（不再静默弹回让人以为页面坏了）
-- CI 阻断修复：`p2-fixes` 套件补 seed 夹具自举双模式（旧版 CI 空库下身份解析不到，
-  403 + 外键崩溃三矩阵全红，对抗审查在干净 worktree 实测复现）
-- 部署加固：`--fresh-db` 连 `-wal/-shm` 一起删（防旧数据经 WAL 回灌致守卫误判跳过 seed）；
-  `remote-deploy.sh` 的 .env 备份改 mktemp 随机路径 + 0600 权限 + trap 兜底恢复；
-  Deploy 工作流完成通知不再无条件展示示例账号（存量库沿用原账号）；
-  `seed.js` 头注释与守卫行为对账；CHANGELOG「移除」段改写为如实描述（本地清理非仓库删除）
+- Finance reporting: summary / monthly / by-product / by-sales now count `status IN ('paid','refunded')` and exclude `order_type='refund'` rows — fully-refunded orders no longer vanish from revenue, and net revenue is no longer double-subtracted into negative
+- Card refund amount is prorated by the order's paid/original ratio and capped at the order's remaining refundable amount; refund lookup uses `unitPrice`
+- Partial refunds now reclaim the card's unused entitlement (count cards zero `remaining_classes`, time cards clear remaining validity), preventing "refund the cash and keep the classes"; negotiated custom amounts and percent-fee modes are treated as a voluntary discount and left untouched
+- Payroll: add `POST /api/payroll/settle` writing `payroll_logs` so net profit stops treating coach pay as zero; `/coaches` and `/settle` exclude future-dated scheduled classes in a mid-month run
+- Audit trail for money writes: order refund, paid-order cancel, payroll settle and void each record an `audit_log` row (amount, rule applied, entitlement reclaimed, actor)
+- Deleting a course rolls back the net of its `earn` and `checkin` point logs instead of only `earn`
+- Wrap order cancel, price edits, points/deduct/class-assign and other read-modify-write paths in transactions
+- Backup directory follows `DB_PATH`; `/api/health` runs a real `SELECT 1` probe; WeChat Pay fails honestly when unconfigured; `allow_self_booking` is enforced
+- Seed guard: `seed.js` requires `--force` on a non-empty DB, `deploy/deploy.sh` skips when data exists, and the Deploy workflow defaults `seed_demo_data` to false — reruns no longer wipe production data; `remote-deploy.sh` preserves `.env`
+- Admin console: fix the missing `Close` icon on the check-in page and the `on-exceed` handler that referenced `ElMessage` from the template (undefined at runtime under on-demand imports); the salary page's "settled this month" flag now queries the specific month instead of the capped 200-row window
+- Login / 401 edge cases: `/login?redirect=/login` no longer dead-ends; concurrent 401s prompt and redirect only once
 
-### 安全 Security（第二轮复审追加）
+### Changed
 
-- JWT 吊销链补洞：`token_version` 校验旧版 `u &&` 短路，users 行不存在
-  （openid 已轮换 / 账号已删除）时放行无主 Token，冻结角色最长存活 7 天——
-  现行不存在同样返回 401 强制重登
-- `deploy.sh` 原生部署路径显式以 `NODE_ENV=production` 启动后端：
-  此前不设环境变量直接 `node server.js`，会使「生产默认关闭」的
-  `PARENT_PHONE_LOGIN` 免密开关在生产机实际处于开启状态；
-  同时修正 JWT_SECRET 提示与真实行为（自动生成持久化密钥）不一致的旧文案
-- 登录回跳同源校验加固：`/\evil.com` 形式（WHATWG 反斜杠归一）不再作为 redirect 通过
-
-### 修复 Fixed（第二轮复审追加）
-
-- 退款 + 耗课双拿：按退费规则建议值的「部分退款」退还的现金正是卡内未用权益的对价，
-  此前退完钱课时/有效期照常可用——现同步回收（次数卡清零 remaining_classes、
-  时效卡清零剩余有效期），成功提示告知回收内容；
-  协商自定义金额与比例手续费模式视为机构自愿让利，不动权益
-- 薪资月中结算口径：`/coaches` 预览与 `/settle` 结算均剔除未来日期的 scheduled 课节
-  （fixed 规则下未上课程也按 baseRate 计酬，整月范围会提前透支应付课酬），
-  结算响应回显实际计酬截止日，前端提示「月底后可作废重算补入剩余课程」
-- 资金写入留痕：订单退款 / 已支付订单取消 / 薪资结算 / 结算作废四类资金操作补
-  `audit_log` 记录（金额、是否按规则建议值、权益回收、操作人），事后可追责
-- 删除活动级联清理：签到奖励积分流水为 `type='checkin'`（非 'earn'），
-  旧版只回滚 earn——签到分随流水被删、学员余额却不清，账实不符；
-  现按被删流水净额（含撤销负向行）统一回滚 earn/checkin
-- 管理端两处按需引入下的运行时坏引用：签到页缺席状态 `Close` 图标缺失导入（图标空白），
-  系统设置恢复数据 `on-exceed` 处理器在模板内联引用 `ElMessage`（编译成 `_ctx.ElMessage`
-  运行时 undefined，触发即抛错）——均改由 script 显式导入/声明
-- 薪资结算页「本月已结算」判定改按月份专用查询，不再受结算记录列表 200 条窗口
-  限制（记录变多后误判未结算、重复点击被后端拒绝的困惑消除）
-
-### 测试与变更（第二轮复审追加）
-
-- 新增离线回归套件 `tests/review2-regression.cjs`（30 项）：部分退款权益回收与协商
-  金额豁免、月中结算未来课节剔除、settle/void 审计留痕、活动删除积分净额回滚，
-  已并入 `npm test` 与 CI 门禁
-- 家长扫码签到 QR 一次性 nonce（审计建议项）经评估不实现：身份源于 JWT、
-  绑定 + 报名 + 时间窗口 + 唯一考勤四重约束下转发二维码无利可图，
-  一次性码只会误伤弱网家长——决策以代码注释留档
-- 版本号统一升至 **1.0.1**（根 / backend / web-admin package.json）
-
-### 变更 Changed
-
-- 管理后台 Element Plus 改按需引入（自定义 unplugin 解析器绕开 barrel tree-shaking 陷阱）：
-  element-plus chunk 1060→584 kB、CSS 352→221 kB；xlsx 499 kB 改动态加载
-- 前端菜单过滤与路由守卫统一 `hasPageAccess` 判定；404 catch-all；
-  401 掉线带 `redirect` 回跳原页；登出清全部身份缓存
-- CI 纳入 `p2-fixes` / `finance-refund-regression` 与全功能 256 项套件（专项套件扩至 7 个；
-  CI 空库自动以 seed 夹具自举，本地仍优先使用真实库快照）；根目录新增统一入口 `npm test`
-- `.env.example` 补 `PARENT_PHONE_LOGIN` / `STAFF_DEFAULT_PASSWORD` 说明
-
-### 移除 Removed
-
-- 本地工作区清理（下列文件本就未被 git 跟踪，仓库无对应删除记录）：
-  旧代脚本 `start.sh` / `stop.sh`（由 `start-all.sh` / `stop-all.sh` 取代）、
-  CloudBase 遗物 `seed-data.js` / `init-cloud.js` / `deploy-functions.sh` 从开发机移除；
-  根目录散落的 10 份 AUDIT/QA 历史报告移入 `docs/archive/`（`.gitignore` 覆盖）
-
+- Element Plus switched to on-demand import: element-plus chunk 1060→584 kB, CSS 352→221 kB; xlsx loaded dynamically
+- Menu filtering and route guards share one `hasPageAccess` check; add a 404 catch-all; 401 carries a `redirect` back to the original page; logout clears all identity caches
+- CI runs 7 isolated regression suites plus the full 256-check suite; add a single `npm test` entry point at the repo root; add `tests/finance-payroll-regression.cjs`
+- `.env.example` documents `PARENT_PHONE_LOGIN` and `STAFF_DEFAULT_PASSWORD`
 
 <!--
 
