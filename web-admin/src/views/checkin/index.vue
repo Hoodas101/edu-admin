@@ -184,7 +184,7 @@ const props = defineProps({
 import { ref, computed, onMounted } from 'vue'
 import dayjs from 'dayjs'
 import { getSchedules, getScheduleDetail, checkinTeacher, getExport } from '@/api/modules'
-import { Download, UserFilled, Check, Calendar, Clock, Location, User } from '@element-plus/icons-vue'
+import { Download, UserFilled, Check, Close, Calendar, Clock, Location, User } from '@element-plus/icons-vue'
 import { exportXlsx } from '@/utils/xlsx'
 import ExportDialog from '@/components/ExportDialog.vue'
 import StatusDot from '@/components/StatusDot.vue'

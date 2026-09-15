@@ -953,11 +953,15 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
         const ph = scheds.map(() => '?').join(',');
         const ids = scheds.map((s) => s.id);
         // 级联清理排期关联数据，避免孤儿记录（请假/扣课日志/签到积分流水/训练点评）
-        // 先按待删 earn 流水回滚余额（逐学员聚合）
+        // 删除签到积分流水时同步回滚 points.balance/total_earned——此前只删流水不改余额，
+        // 学员积分账户凭空多出已删除活动的分数，兑换时账实不符。
+        // 旧版只回滚 'earn'，漏掉签到奖励的 'checkin' 发放（见 checkin.js addPoints）；
+        // 回滚额取被删流水的净额 SUM(amount)（含 reversePoints 冲销的负向行，
+        // 只加正数会在「发放后又撤销」的场次上多扣），净额 <=0 的学员无需回滚。
         const affected = db.prepare(`
           SELECT student_id, SUM(amount) total FROM point_logs
-          WHERE type = 'earn' AND reference_id IN (${ph}) GROUP BY student_id
-        `).all(...ids);
+          WHERE type IN ('earn','checkin') AND reference_id IN (${ph}) GROUP BY student_id
+        `).all(...ids).filter((a) => (a.total || 0) > 0);
         db.prepare('DELETE FROM enrollments WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM attendances WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM leave_requests WHERE schedule_id IN (' + ph + ')').run(...ids);

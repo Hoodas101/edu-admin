@@ -443,7 +443,7 @@
                 :limit="1"
                 accept=".db"
                 :on-change="onRestoreFileChange"
-                :on-exceed="() => ElMessage.warning('一次仅能选择一个文件')"
+                :on-exceed="onRestoreExceed"
               >
                 <el-button :icon="Upload">选择 .db 备份文件</el-button>
               </el-upload>
@@ -900,6 +900,10 @@ const onRestoreFileChange = (file) => {
   restoreFile.value = file.raw
   restoreResult.value = null
 }
+
+// 必须在 script 内声明：模板内联箭头里直接引用 ElMessage 会被编译成 _ctx.ElMessage，
+// 按需引入（无全局注册）下运行时为 undefined，触发 exceed 即抛错
+const onRestoreExceed = () => ElMessage.warning('一次仅能选择一个文件')
 
 const handleRestore = () => {
   if (!restoreFile.value) {

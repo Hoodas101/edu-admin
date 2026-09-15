@@ -125,14 +125,19 @@ app.use((req, res, next) => {
     const payload = verifyToken(token);
     if (payload && payload.openid) {
       // token_version 吊销校验：停用/改密/降级后 bump 计数，旧 Token 立即失效。
-      // 兜底查询失败（库忙等）时放行，不因读库异常把全员踢下线。
+      // 行不存在（openid 已轮换 / 账号已删除）同样视为吊销 —— 旧版 u && 短路会放行
+      // 无对应用户行的 Token，令冻结角色最长存活 7 天，架空整条吊销链。
+      // 兜底：查询本身抛异常（库忙等）时放行，不因读库异常把全员踢下线。
       try {
         const u = db.prepare('SELECT token_version, status FROM users WHERE openid = ?').get(payload.openid);
+        if (!u) {
+          return res.status(401).json({ code: 401, data: null, message: '登录状态已失效，请重新登录' });
+        }
         // 仅对显式非 active 的账号拒绝（历史行可能无 status 值）
-        if (u && u.status && u.status !== 'active') {
+        if (u.status && u.status !== 'active') {
           return res.status(401).json({ code: 401, data: null, message: '账号已停用，请联系管理员' });
         }
-        if (u && (u.token_version || 0) !== (payload.tv || 0)) {
+        if ((u.token_version || 0) !== (payload.tv || 0)) {
           return res.status(401).json({ code: 401, data: null, message: '登录状态已失效，请重新登录' });
         }
       } catch (e) {

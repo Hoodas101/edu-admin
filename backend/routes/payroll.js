@@ -12,7 +12,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, formatDate, recordAudit } = require('../utils');
 const {
   DEFAULT_RULE,
   normalizeRule,
@@ -114,10 +114,13 @@ router.get('/coaches', (req, res) => {
     const range = monthRange(req.query.month);
     if (!range) return res.json(fail('月份格式应为 YYYY-MM'));
     const { startDate, endDate } = range;
+    // 与 /settle 同口径：月中查看时，未来日期的课节不计入应付（fixed 规则下
+    // 未上的课也按 baseRate 计，提前入账会造成结算预览与实际结算不一致）
+    const effEnd = endDate > formatDate(now()) ? formatDate(now()) : endDate;
     const teachers = db.prepare("SELECT * FROM teachers ORDER BY status, name").all();
     const list = teachers.map((t) => {
       const rule = getPayRule(t);
-      const rows = lessonRows(t.id, startDate, endDate);
+      const rows = lessonRows(t.id, startDate, effEnd);
       return {
         teacherId: t.id,
         name: t.name,
@@ -130,7 +133,7 @@ router.get('/coaches', (req, res) => {
         amount: rows ? rows.totals.amount : 0,
       };
     });
-    res.json(success({ list, month: req.query.month, startDate, endDate }));
+    res.json(success({ list, month: req.query.month, startDate, endDate: effEnd }));
   } catch (err) {
     console.error('[payroll coaches]', err);
     res.status(500).json(safeFail('获取薪资结算失败'));
@@ -196,6 +199,11 @@ router.post('/settle', (req, res) => {
     const range = monthRange(month);
     if (!range) return res.json(fail('月份格式应为 YYYY-MM'));
     const { startDate, endDate } = range;
+    // 月中结算只计「已发生」课节：未来日期的 scheduled 课节不计酬
+    // （fixed 规则下未到课的课节也按 baseRate 计，整月范围会提前透支应付课酬；
+    //   月底可作废重算，把剩余已上课程补入）。与 /coaches 预览同口径。
+    const todayStr = formatDate(now());
+    const effEnd = endDate > todayStr ? todayStr : endDate;
 
     const teachers = db.prepare("SELECT * FROM teachers").all();
     const result = db.transaction(() => {
@@ -212,7 +220,7 @@ router.post('/settle', (req, res) => {
       let totalAmount = 0;
       const t = now();
       for (const teacher of teachers) {
-        const data = lessonRows(teacher.id, startDate, endDate);
+        const data = lessonRows(teacher.id, startDate, effEnd);
         if (!data || !data.rows.length) continue;
         const amount = Math.round(data.totals.amount * 100) / 100;
         if (amount <= 0) continue;
@@ -223,7 +231,17 @@ router.post('/settle', (req, res) => {
         settled += 1;
         totalAmount += amount;
       }
-      return { ok: true, settled, totalAmount: Math.round(totalAmount * 100) / 100, month };
+      // 资金写入留痕：结算影响财务净利润，可追溯是谁在何时按什么范围结的算
+      recordAudit(db, {
+        entity: 'payroll',
+        entityId: month,
+        action: 'settle',
+        actorId: getOpenId(req),
+        actorRole: req.userRole || '',
+        before: null,
+        after: { month, settled, totalAmount: Math.round(totalAmount * 100) / 100, endDateUsed: effEnd },
+      });
+      return { ok: true, settled, totalAmount: Math.round(totalAmount * 100) / 100, month, clamped: effEnd < endDate };
     })();
 
     if (result.err) return res.json(fail(result.err));
@@ -266,6 +284,16 @@ router.post('/logs/:id/void', (req, res) => {
     if (!row) return res.json(fail('结算记录不存在'));
     if (row.status !== 'settled') return res.json(fail('仅已结算记录可作废'));
     db.prepare("UPDATE payroll_logs SET status = 'voided', paid_at = NULL WHERE id = ?").run(req.params.id);
+    // 作废直接冲减财务净利润，同样必须留痕
+    recordAudit(db, {
+      entity: 'payroll',
+      entityId: req.params.id,
+      action: 'void_settle',
+      actorId: getOpenId(req),
+      actorRole: req.userRole || '',
+      before: { status: row.status, month: row.month, amount: row.amount, teacher_name: row.teacher_name },
+      after: { status: 'voided' },
+    });
     res.json(success({ voided: true, id: req.params.id }));
   } catch (err) {
     console.error('[payroll void]', err);

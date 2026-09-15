@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate, recordAudit } = require('../utils');
 
 // 管理员判断（兼容 JWT 与 x-openid 开发模式）
 function isAdminReq(req) {
@@ -407,6 +407,7 @@ function computeRefundSuggestion(order) {
   }
 
   return { started, mode, amount, reason, cardInfo, remain, needApproval, processDays,
+    cardId: card ? card.id : null,
     rules: { beforeStart, beforeStartPercent, afterStart, afterStartPercent } };
 }
 
@@ -454,6 +455,7 @@ router.post('/:id/refund', (req, res) => {
     const { id } = req.params;
     const { reason = '', refundAmount, confirmOverride } = req.body;
     const currentTime = now();
+    let clawback = null; // 部分退款回收权益的说明（返回给前端提示）
 
     // 事务内原子处理：重读订单 + 乐观锁（基于 refunded_amount 未变）避免并发超额退款 / 重复退款流水
     const result = db.transaction(() => {
@@ -485,6 +487,9 @@ router.post('/:id/refund', (req, res) => {
       if (newRefunded > paidAmount) return { err: '累计退款金额不能超过订单金额' };
 
       const isFull = newRefunded >= paidAmount;
+      // 是否走了「规则建议值」（¥1 容差内）：只有按规则退款才触发权益回收，
+      // 协商性自定义金额（confirmOverride）视为机构自愿让利，不动卡内权益。
+      const appliedSuggestion = Math.abs(requested - suggestion.amount) <= 1;
       // 乐观锁：仅当当前 refunded_amount 未发生变化时才写入，并发请求因读到旧值而更新失败
       const upd = db.prepare("UPDATE orders SET refunded_amount = ?, status = CASE WHEN ? >= ? THEN 'refunded' ELSE status END, updated_at = ? WHERE id = ? AND refunded_amount = ?")
         .run(newRefunded, newRefunded, paidAmount, currentTime, order.id, refundedSoFar);
@@ -512,12 +517,45 @@ router.post('/:id/refund', (req, res) => {
             WHERE student_id = ?
           `).run(totalReward, totalReward, currentTime, order.student_id);
         }
+      } else if (appliedSuggestion && suggestion.started && suggestion.mode === 'custom' && suggestion.cardId) {
+        // 「按未上课时退还」的部分退款：退的现金正是卡内未用权益的对价，必须同步回收，
+        // 否则学员既拿回剩余课时退款、又能继续把课上完（退款+耗课双拿）。
+        // 协商性自定义金额与「扣除手续费」比例退款不动权益——那是机构自愿让利/违约金语义。
+        const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(suggestion.cardId);
+        if (card && card.status !== 'refunded') {
+          if ((card.billing_mode || 'time') === 'count') {
+            db.prepare('UPDATE member_cards SET remaining_classes = 0, updated_at = ? WHERE id = ?').run(currentTime, card.id);
+            clawback = `已同步回收卡内剩余 ${card.remaining_classes || 0} 次课时`;
+          } else {
+            db.prepare('UPDATE member_cards SET expires_at = ?, updated_at = ? WHERE id = ?').run(currentTime, card.id);
+            clawback = '已同步清零卡内剩余有效期';
+          }
+        }
       }
 
       // 创建退款支付记录（记录实际退款金额）
       const paymentId = generateId('REF');
       db.prepare('INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(paymentId, order.id, order.order_no, order.user_id, amount, 'wechat', 'refunded', currentTime, currentTime);
+
+      // 资金流出必须留痕：金额、是否规则建议值、是否触发权益回收，事后可追责
+      recordAudit(db, {
+        entity: 'order',
+        entityId: order.id,
+        action: 'refund',
+        actorId: getOpenId(req),
+        actorRole: req.userRole || '',
+        before: { refunded_amount: refundedSoFar, status: order.status },
+        after: {
+          refunded_amount: newRefunded,
+          amount,
+          full: isFull,
+          appliedSuggestion,
+          clawback: clawback || null,
+          reason,
+          payment_id: paymentId,
+        },
+      });
 
       return { ok: true, amount, full: isFull, reason };
     })();
@@ -529,7 +567,7 @@ router.post('/:id/refund', (req, res) => {
         `退款金额与退费规则建议(¥${result.suggested})不符：${result.reason}。如确认偏离规则请勾选「按规则外金额退款」`
       ));
     }
-    res.json(success({ refunded: true, refundAmount: result.amount, full: result.full, reason: result.reason }));
+    res.json(success({ refunded: true, refundAmount: result.amount, full: result.full, reason: result.reason, clawback }));
   } catch (err) {
     console.error('[orders refund]', err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -640,6 +678,18 @@ router.post('/:id/cancel', (req, res) => {
       }
 
       db.prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, id);
+      if (order.status === 'paid') {
+        // 已支付订单取消涉及资金回滚（卡回收/积分扣回/流水冲销），与退款同等留痕
+        recordAudit(db, {
+          entity: 'order',
+          entityId: id,
+          action: 'cancel_paid',
+          actorId: getOpenId(req),
+          actorRole: req.userRole || '',
+          before: { status: 'paid', payable_amount: order.payable_amount },
+          after: { status: 'cancelled' },
+        });
+      }
     })();
     res.json(success({ cancelled: true }));
   } catch (err) {

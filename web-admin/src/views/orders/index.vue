@@ -750,7 +750,8 @@ const confirmRefund = async () => {
       reason: reasonMap[refundMode.value],
       refundAmount: refundFinal.value,
     })
-    ElMessage.success(res.full ? '全额退款成功' : '部分退款成功')
+    const clawbackTip = res.clawback ? `，${res.clawback}` : ''
+    ElMessage.success(`${res.full ? '全额退款' : '部分退款'}成功${clawbackTip}`)
     refundDialogVisible.value = false
     if (orderDetailVisible.value) loadOrders()
     loadOrders()

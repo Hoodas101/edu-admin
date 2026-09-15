@@ -14,7 +14,7 @@
           value-format="YYYY-MM"
           :clearable="false"
           style="width: 150px"
-          @change="load"
+          @change="onMonthChange"
         />
         <template v-if="isAdmin">
           <el-button
@@ -390,21 +390,36 @@ const load = async () => {
 const settling = ref(false)
 const loadingLogs = ref(false)
 const payrollLogs = ref([])
-const monthSettled = computed(() =>
-  payrollLogs.value.some((r) => r.month === month.value && r.status === 'settled')
-)
+// 全量列表接口有 LIMIT 200 窗口：记录变多后旧月份会掉出窗口，
+// 仅靠窗口判断「本月已结算」会误判成未结算 → 单独拉当前选中月份的记录做判定。
+// null = 该月尚未加载（回退用窗口列表判断，避免首屏空窗期按钮闪变）
+const monthLogs = ref(null)
+const monthSettled = computed(() => {
+  const src = monthLogs.value !== null ? monthLogs.value : payrollLogs.value
+  return src.some((r) => r.month === month.value && r.status === 'settled')
+})
 
-const loadLogs = async () => {
+const loadLogs = async (m) => {
   if (!isAdmin.value) return
   loadingLogs.value = true
   try {
-    const res = await getPayrollLogs()
-    payrollLogs.value = res.list || []
+    const res = await getPayrollLogs(m)
+    if (m) monthLogs.value = res.list || []
+    else payrollLogs.value = res.list || []
   } catch (e) {
-    payrollLogs.value = []
+    if (m) monthLogs.value = []
+    else payrollLogs.value = []
   } finally {
     loadingLogs.value = false
   }
+}
+
+const refreshLogs = () => Promise.all([loadLogs(), loadLogs(month.value)])
+
+const onMonthChange = () => {
+  monthLogs.value = null
+  load()
+  loadLogs(month.value)
 }
 
 const settleCount = computed(() => settlement.value.filter((r) => (r.amount || 0) > 0).length)
@@ -426,8 +441,11 @@ const settleNow = async () => {
   settling.value = true
   try {
     const res = await settlePayroll(month.value)
-    ElMessage.success(`已结算 ${res.settled} 位 · ¥${Number(res.totalAmount || 0).toLocaleString()}`)
-    await loadLogs()
+    ElMessage.success(
+      `已结算 ${res.settled} 位 · ¥${Number(res.totalAmount || 0).toLocaleString()}`
+      + (res.clamped ? '（截至今日已发生的课节；月底后可作废重算补入剩余课程）' : '')
+    )
+    await Promise.all([refreshLogs(), load()])
   } catch (e) { /* 拦截器已提示（如"该月已结算"） */ } finally {
     settling.value = false
   }
@@ -435,7 +453,9 @@ const settleNow = async () => {
 
 const voidLog = async (row) => {
   // 结算是整月批量：作废单行后该月若还剩其它 settled 记录，「确认结算」仍被锁定——提前讲清，避免老板逐条找不到按钮
-  const others = payrollLogs.value.filter((r) => r.month === row.month && r.status === 'settled' && r.id !== row.id).length
+  // 计数来源：正在查看的月份用 monthLogs（该月全量，不受列表 200 条窗口限制），其余月份回落窗口列表
+  const src = row.month === month.value && monthLogs.value ? monthLogs.value : payrollLogs.value
+  const others = src.filter((r) => r.month === row.month && r.status === 'settled' && r.id !== row.id).length
   const extra = others > 0 ? `\n该月另有 ${others} 位${t('instructor')}的结算记录，需全部作废后才能重新「确认结算」。` : '\n作废后可对该月重新「确认结算」。'
   try {
     await ElMessageBox.confirm(
@@ -449,7 +469,7 @@ const voidLog = async (row) => {
   try {
     await voidPayrollLog(row.id)
     ElMessage.success('已作废')
-    await loadLogs()
+    await refreshLogs()
   } catch (e) { /* 拦截器已提示 */ }
 }
 
@@ -594,7 +614,7 @@ const doExportOne = async (range) => {
 
 onMounted(() => {
   load()
-  loadLogs()
+  refreshLogs()
 })
 </script>
 
