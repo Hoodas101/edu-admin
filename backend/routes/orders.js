@@ -292,7 +292,7 @@ router.post('/:id/pay', (req, res) => {
     const { id } = req.params;
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     if (!order) return res.json(fail('订单不存在'));
-    // 归属校验：仅订单本人（或绑定成员对应用户）可支付
+    // Ownership: only the order owner (or a bound parent) can pay
     if (!isAdminReq(req)) {
       const openid = getOpenId(req);
       const owned = order.user_id === openid || db.prepare(
@@ -301,15 +301,16 @@ router.post('/:id/pay', (req, res) => {
       if (!owned) return res.status(403).json(safeFail('无权操作该订单'));
     }
     if (order.status === 'cancelled' || order.status === 'refunded') return res.json(fail('订单已取消或已退款'));
-    // 家长自助「模拟支付」开关：真实微信支付接入后应设置 SIMULATED_PAY_DISABLED=1，
-    // 关闭待支付订单的自助标记已付通道（否则家长可把销售挂起的欠款单直接置为已付，
-    // 白得会员卡与赠送积分，资金流水与实收脱钩）。管理员仍可正常操作。
+    // Self-mark-paid is a simulated-pay shortcut; once real WeChat Pay is
+    // live, set SIMULATED_PAY_DISABLED=1 so parents can't clear unpaid
+    // orders themselves. Admins are unaffected.
     if (!isAdminReq(req) && process.env.SIMULATED_PAY_DISABLED === '1') {
       return res.status(403).json(safeFail('该机构未开放自助支付，请联系机构收银'));
     }
 
     const currentTime = now();
-    // 事务内原子抢占：仅当订单仍为 pending 时置为 paid，影响行数=0 即说明已被其他并发请求处理，避免重复激活/重复赠分
+    // Atomic claim inside the transaction: pending → paid. Zero affected rows
+    // means a concurrent request already handled it — prevents double activation.
     const result = db.transaction(() => {
       const claim = db.prepare("UPDATE orders SET status = 'paid', paid_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'")
         .run(currentTime, currentTime, order.id);
@@ -455,9 +456,9 @@ router.post('/:id/refund', (req, res) => {
     const { id } = req.params;
     const { reason = '', refundAmount, confirmOverride } = req.body;
     const currentTime = now();
-    let clawback = null; // 部分退款回收权益的说明（返回给前端提示）
-
-    // 事务内原子处理：重读订单 + 乐观锁（基于 refunded_amount 未变）避免并发超额退款 / 重复退款流水
+    let clawback = null; // set when a partial refund reclaims card entitlement
+    // Refund runs in one transaction with an optimistic lock on refunded_amount
+    // to prevent concurrent double refunds.
     const result = db.transaction(() => {
       const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
       if (!order) return { err: '订单不存在' };
@@ -487,10 +488,10 @@ router.post('/:id/refund', (req, res) => {
       if (newRefunded > paidAmount) return { err: '累计退款金额不能超过订单金额' };
 
       const isFull = newRefunded >= paidAmount;
-      // 是否走了「规则建议值」（¥1 容差内）：只有按规则退款才触发权益回收，
-      // 协商性自定义金额（confirmOverride）视为机构自愿让利，不动卡内权益。
+      // Entitlement reclaim applies only to rule-suggested amounts;
+      // a negotiated custom amount is a voluntary discount and keeps card benefits.
       const appliedSuggestion = Math.abs(requested - suggestion.amount) <= 1;
-      // 乐观锁：仅当当前 refunded_amount 未发生变化时才写入，并发请求因读到旧值而更新失败
+      // Optimistic lock: fails if refunded_amount changed concurrently
       const upd = db.prepare("UPDATE orders SET refunded_amount = ?, status = CASE WHEN ? >= ? THEN 'refunded' ELSE status END, updated_at = ? WHERE id = ? AND refunded_amount = ?")
         .run(newRefunded, newRefunded, paidAmount, currentTime, order.id, refundedSoFar);
       if (upd.changes === 0) return { conflict: true };
@@ -518,9 +519,8 @@ router.post('/:id/refund', (req, res) => {
           `).run(totalReward, totalReward, currentTime, order.student_id);
         }
       } else if (appliedSuggestion && suggestion.started && suggestion.mode === 'custom' && suggestion.cardId) {
-        // 「按未上课时退还」的部分退款：退的现金正是卡内未用权益的对价，必须同步回收，
-        // 否则学员既拿回剩余课时退款、又能继续把课上完（退款+耗课双拿）。
-        // 协商性自定义金额与「扣除手续费」比例退款不动权益——那是机构自愿让利/违约金语义。
+        // Partial refund by rule pays out unused classes/time — reclaim them,
+        // otherwise the student gets cash back AND keeps consuming the card.
         const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(suggestion.cardId);
         if (card && card.status !== 'refunded') {
           if ((card.billing_mode || 'time') === 'count') {
@@ -533,12 +533,12 @@ router.post('/:id/refund', (req, res) => {
         }
       }
 
-      // 创建退款支付记录（记录实际退款金额）
+      // Refund payment record
       const paymentId = generateId('REF');
       db.prepare('INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(paymentId, order.id, order.order_no, order.user_id, amount, 'wechat', 'refunded', currentTime, currentTime);
 
-      // 资金流出必须留痕：金额、是否规则建议值、是否触发权益回收，事后可追责
+      // Audit every money-out
       recordAudit(db, {
         entity: 'order',
         entityId: order.id,
@@ -595,7 +595,7 @@ router.put('/:id', (req, res) => {
     if (payableAmount !== undefined) {
       const amount = Number(payableAmount);
       if (!isFinite(amount) || amount < 0) return res.json(fail('金额不合法'));
-      // 不得低于已退金额：否则净营收统计与退款上限校验口径全部失真
+      // Never below what was already refunded
       const refundedSoFar = Number(order.refunded_amount) || 0;
       if (amount < refundedSoFar) return res.json(fail(`金额不能低于已退款金额 ¥${refundedSoFar}`));
       fields.push('payable_amount = ?');
@@ -679,7 +679,7 @@ router.post('/:id/cancel', (req, res) => {
 
       db.prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, id);
       if (order.status === 'paid') {
-        // 已支付订单取消涉及资金回滚（卡回收/积分扣回/流水冲销），与退款同等留痕
+        // Cancelling a paid order rolls back money — same audit as refund
         recordAudit(db, {
           entity: 'order',
           entityId: id,

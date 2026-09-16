@@ -114,8 +114,8 @@ router.get('/coaches', (req, res) => {
     const range = monthRange(req.query.month);
     if (!range) return res.json(fail('月份格式应为 YYYY-MM'));
     const { startDate, endDate } = range;
-    // 与 /settle 同口径：月中查看时，未来日期的课节不计入应付（fixed 规则下
-    // 未上的课也按 baseRate 计，提前入账会造成结算预览与实际结算不一致）
+    // Same cutoff as /settle: exclude future-dated classes so the preview
+    // matches what a mid-month settle would actually pay.
     const effEnd = endDate > formatDate(now()) ? formatDate(now()) : endDate;
     const teachers = db.prepare("SELECT * FROM teachers ORDER BY status, name").all();
     const list = teachers.map((t) => {
@@ -199,9 +199,8 @@ router.post('/settle', (req, res) => {
     const range = monthRange(month);
     if (!range) return res.json(fail('月份格式应为 YYYY-MM'));
     const { startDate, endDate } = range;
-    // 月中结算只计「已发生」课节：未来日期的 scheduled 课节不计酬
-    // （fixed 规则下未到课的课节也按 baseRate 计，整月范围会提前透支应付课酬；
-    //   月底可作废重算，把剩余已上课程补入）。与 /coaches 预览同口径。
+    // Only lessons up to today are payable; future scheduled classes are excluded
+    // so a mid-month settle doesn't prepay classes that haven't happened.
     const todayStr = formatDate(now());
     const effEnd = endDate > todayStr ? todayStr : endDate;
 
@@ -231,7 +230,7 @@ router.post('/settle', (req, res) => {
         settled += 1;
         totalAmount += amount;
       }
-      // 资金写入留痕：结算影响财务净利润，可追溯是谁在何时按什么范围结的算
+      // Settle affects net profit — record who/when/scope in the audit log
       recordAudit(db, {
         entity: 'payroll',
         entityId: month,
@@ -284,7 +283,7 @@ router.post('/logs/:id/void', (req, res) => {
     if (!row) return res.json(fail('结算记录不存在'));
     if (row.status !== 'settled') return res.json(fail('仅已结算记录可作废'));
     db.prepare("UPDATE payroll_logs SET status = 'voided', paid_at = NULL WHERE id = ?").run(req.params.id);
-    // 作废直接冲减财务净利润，同样必须留痕
+    // Voiding reverses a money write — audit it too
     recordAudit(db, {
       entity: 'payroll',
       entityId: req.params.id,

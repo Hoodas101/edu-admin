@@ -257,10 +257,9 @@ router.post('/teacher', (req, res) => {
 });
 
 /**
- * 首次到课的「次数卡扣课」：与教师点名路径共用同一套规则，
- * 家长扫码签到此前完全不扣课，导致次数卡学员无限白嫖课时。
- * 幂等：同一排期+学员只扣一次；补课/调课登记的学员不重复扣（原排期已扣或请假已扣）。
- * 必须在事务内调用。
+ * Deduct one class from a count card on first arrival.
+ * Shared with the teacher roll-call path; idempotent per (schedule, student);
+ * must be called inside a transaction.
  */
 function applyArrivalDeduction(studentId, scheduleId, t) {
   const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
@@ -293,18 +292,14 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
 }
 
 /**
- * POST /api/checkin/parent — 家长扫码签到
+ * POST /api/checkin/parent — parent QR check-in
  * Body: { scheduleId, studentId }
  *
- * 安全边界：
- * 1) 家长绑定校验（只能给自家孩子签）
- * 2) 报名校验（只能给已报名该排期的孩子签，杜绝给任意排期刷记录）
- * 3) 时间窗口（开始前 2h 至结束后 2h，防补签刷积分）
- * 4) 次数卡正常扣课（与教练点名一致，杜绝白嫖课时）
- *
- * No one-time QR nonce is needed: the payload carries only scheduleId and the
- * identity comes from the parent's JWT, so binding + enrollment + time window +
- * unique attendance already bound every check-in to a legitimate student.
+ * Enforces: binding ownership, enrollment in this schedule, a time window
+ * (2h before start to 2h after end), and normal count-card deduction — same
+ * as the teacher roll-call path. No QR nonce needed: identity comes from the
+ * parent's JWT and the checks above already bind each check-in to a
+ * legitimate student.
  */
 router.post('/parent', (req, res) => {
   try {
@@ -347,7 +342,7 @@ router.post('/parent', (req, res) => {
 
     const pointsEarned = 10;
     const t = now();
-    // 考勤写入 + 积分 + 扣课原子化：中途失败不留「有考勤无扣课」的白嫖记录
+    // Attendance + points + class deduction in one transaction
     const outcome = db.transaction(() => {
       const existing = db.prepare(
         'SELECT * FROM attendances WHERE schedule_id = ? AND student_id = ?'
@@ -395,8 +390,8 @@ router.post('/parent', (req, res) => {
 router.get('/records', (req, res) => {
   try {
     const { studentId, scheduleId, date, month, status } = req.query;
-    // 不带 studentId 时为全机构查询，仅限管理端工作人员；
-    // 家长必须带 studentId 走下方归属校验，否则可读全机构出勤明细（横向越权）
+    // Without studentId this is an org-wide query — staff only;
+    // parents must pass studentId and go through the ownership check below.
     if (!studentId && !isStaffReq(req)) {
       return res.status(403).json(safeFail('无权查看全部签到记录'));
     }
