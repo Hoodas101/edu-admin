@@ -1,6 +1,6 @@
 /**
- * 对抗性复审（pass 7）修复回归校验（离线，隔离库）
- * 覆盖 2026-09-15 复审修复的四个行为回归点：
+ * 资金与薪资回归校验（离线，隔离库）
+ * 覆盖四个行为回归点：
  *   1. orders/:id/refund 部分退款（规则建议值）→ 必须同步回收卡内未用权益
  *      （remaining_classes 清零 + clawback 提示 + audit_log 留痕），
  *      否则「退剩余课时现金 + 继续把课上完」双拿
@@ -10,13 +10,13 @@
  *   4. admin DELETE /courses/:id 级联删除时回滚 'checkin' 类型签到积分
  *      （旧版只回滚 'earn'，签到分随流水被删、余额不清）
  *
- * 运行：node tests/review2-regression.cjs
+ * 运行：node tests/finance-payroll-regression.cjs
  */
-process.env.DB_PATH = '/tmp/review2_test.db';
+process.env.DB_PATH = '/tmp/finance_payroll_test.db';
 process.env.NODE_ENV = 'test';
 
 const fs = require('fs');
-for (const f of ['/tmp/review2_test.db', '/tmp/review2_test.db-wal', '/tmp/review2_test.db-shm']) {
+for (const f of ['/tmp/finance_payroll_test.db', '/tmp/finance_payroll_test.db-wal', '/tmp/finance_payroll_test.db-shm']) {
   try { fs.rmSync(f); } catch (e) { /* ignore */ }
 }
 
@@ -65,7 +65,7 @@ const ins = (sql, ...params) => db.prepare(sql).run(...params);
 const seed = db.transaction(() => {
   ins("INSERT OR IGNORE INTO users (id, openid, role, password, nickname) VALUES (?,?,?,?,?)",
     'u_admin7', 'admin7_openid', 'admin', 'x', 'Admin7');
-  ins("INSERT OR IGNORE INTO students (id, name) VALUES (?,?)", 'stu_p7', '复审学员');
+  ins("INSERT OR IGNORE INTO students (id, name) VALUES (?,?)", 'stu_p7', '资金学员');
   ins("INSERT OR IGNORE INTO courses (id, name, category, created_at) VALUES (?,?,?,?)", 'crs_p7', '体适能', 'training', t);
 
   // === T1：次数卡部分退款回收权益 ===
@@ -75,21 +75,21 @@ const seed = db.transaction(() => {
   // 次数卡：10 次还剩 5 次 → afterStart 默认 unused → 建议退 1000×5/10=500（部分退款）
   ins(`INSERT OR IGNORE INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name, total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    'mc_p7', 'ct_p7', '次卡', 'count', 'stu_p7', '复审学员', 10, 5, 5,
+    'mc_p7', 'ct_p7', '次卡', 'count', 'stu_p7', '资金学员', 10, 5, 5,
     t - 30 * 86400000, t + 60 * 86400000, 'active', 'ord_p7', t, t);
 
   // === T2：薪资月中结算剔除未来课节 ===
   ins("INSERT OR IGNORE INTO teachers (id, name, phone, status, class_fee, pay_rule, created_at) VALUES (?,?,?,?,?,?,?)",
-    'tea_p7', '复审教练', '13700000007', 'active', 100, JSON.stringify({ type: 'fixed', baseRate: 100 }), t);
+    'tea_p7', '结算教练', '13700000007', 'active', 100, JSON.stringify({ type: 'fixed', baseRate: 100 }), t);
   // 月初课节（已发生，attended=0 → fixed 规则仍发 100）
   ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    'sch_past7', 'crs_p7', '体适能', 'tea_p7', '复审教练', day1, '09:00', '10:00', 'scheduled', 0, t, t);
+    'sch_past7', 'crs_p7', '体适能', 'tea_p7', '结算教练', day1, '09:00', '10:00', 'scheduled', 0, t, t);
   if (hasFuture) {
     // 月末课节（未发生：scheduled 且日期 > 今天），修复前按 baseRate 提前计酬
     ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      'sch_future7', 'crs_p7', '体适能', 'tea_p7', '复审教练', endOfMonth, '09:00', '10:00', 'scheduled', 0, t, t);
+      'sch_future7', 'crs_p7', '体适能', 'tea_p7', '结算教练', endOfMonth, '09:00', '10:00', 'scheduled', 0, t, t);
   }
 
   // === T4：课程级联删除回滚签到积分 ===
@@ -99,7 +99,7 @@ const seed = db.transaction(() => {
     'sch_del7', 'crs_del7', '待删活动', '', '2026-08-01', '09:00', '10:00', 'scheduled', t, t);
   ins(`INSERT OR IGNORE INTO points (id, student_id, student_name, total_earned, total_consumed, balance, updated_at)
        VALUES (?,?,?,?,?,?,?)`,
-    'pts_del7', 'stu_p7', '复审学员', 50, 0, 50, t);
+    'pts_del7', 'stu_p7', '资金学员', 50, 0, 50, t);
   // 签到奖励 +10，随后撤销 -5 → 净发放 5，删除活动应回滚 5
   ins(`INSERT OR IGNORE INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at)
        VALUES (?,?,?,?,?,?,?,?,?)`, 'pl_p7a', 'stu_p7', 'checkin', 10, 60, 'checkin', 'sch_del7', '签到奖励', t);
@@ -147,7 +147,7 @@ function expect(condition, label, detail) {
     'ord_p7b', 'OP7002', 'stu_p7', 'membership', 800, 0, 0, 800, 'paid', t, t, t);
   ins(`INSERT OR IGNORE INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name, total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    'mc_p7b', 'ct_p7', '次卡', 'count', 'stu_p7', '复审学员', 8, 6, 2,
+    'mc_p7b', 'ct_p7', '次卡', 'count', 'stu_p7', '资金学员', 8, 6, 2,
     t - 10 * 86400000, t + 60 * 86400000, 'active', 'ord_p7b', t, t);
   const h = getHandler(ordersRouter, 'post', '/:id/refund');
   const res = mockRes();

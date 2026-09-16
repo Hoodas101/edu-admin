@@ -48,9 +48,9 @@ const wxpayRoutes = require('./routes/wxpay');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// 反向代理支持：nginx/Caddy 之后 req.ip 恒为 127.0.0.1，会让限流键共享、审计 IP 失真。
-// 通过 TRUST_PROXY 环境变量设置可信跳数（常见 1；多层代理按需调大），仅信任直连跳数、
-// 避免 X-Forwarded-For 伪造。本地直连部署保持默认（不设 = 不信任任何代理头）。
+// Reverse-proxy support: behind nginx/Caddy, req.ip is always 127.0.0.1 which
+// breaks per-IP rate limiting. TRUST_PROXY sets the number of trusted hops
+// (usually 1); unset means no proxy headers are trusted.
 if (process.env.TRUST_PROXY) {
   const hops = parseInt(process.env.TRUST_PROXY);
   app.set('trust proxy', Number.isInteger(hops) && hops > 0 ? hops : true);
@@ -77,7 +77,7 @@ app.use(cors({
 // === 全局速率限制 ===
 const rateLimitMap = new Map();
 const RATE_WINDOW = 60 * 1000; // 1 分钟
-const RATE_MAX = parseInt(process.env.RATE_MAX) || 600; // 每分钟最多 600 次请求（可通过 RATE_MAX 环境变量调整；数据看板 + 小程序端轮询并发使用不误伤，仍可防滥用）
+const RATE_MAX = parseInt(process.env.RATE_MAX) || 600; // per IP per minute; tunable via env
 app.use((req, res, next) => {
   // 预检请求不参与限流
   if (req.method === 'OPTIONS') return next();
@@ -96,11 +96,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// 普通请求限制 1mb；数据导入接口（整体/分模块导入 JSON）放宽至 100mb，
-// 避免大批量业务数据导入被全局 1mb 拦截。私有化内网部署，风险可控。
+// 1mb body limit for normal requests; data-import endpoint allows 100mb.
 const jsonParser = bodyParser.json({ limit: '1mb' });
 app.use((req, res, next) => {
-  // 导入接口跳过全局 1mb 解析，交由下方专用大 body 解析器处理
+  // import endpoint skips the global parser; handled by the big parser below
   if (req.path === '/api/settings/import') return next();
   jsonParser(req, res, next);
 });
@@ -113,21 +112,20 @@ app.use((req, res, next) => {
   // 仅保护 API 路由，静态资源与 SPA 页面直接放行
   if (!req.path.startsWith('/api')) return next();
   if (PUBLIC_PATHS.some(p => req.path.startsWith(p))) return next();
-  // GET /api/settings 公开读取：机构配置（站点名/Logo/称呼方案/客服电话等）供登录页与
-  // 应用启动渲染，无需鉴权。写操作（PUT/POST/DELETE）仍走下方鉴权，避免任意人篡改机构设置。
+  // GET /api/settings is public: org branding (site name / logo / terms) is
+  // needed by the login page. Writes still require auth.
   if (req.method === 'GET' && req.path === '/api/settings') return next();
 
-  // 验证 JWT Token（身份唯一可信来源：必须由后端签发的 JWT 承载，绝不信任任何
-  // 客户端可控的 x-openid / ?openid= / body.openid —— 否则任意人可伪造管理员身份）
+  // Verify JWT — the only trusted identity source. Client-supplied
+  // x-openid / ?openid= / body.openid are never trusted.
   const authHeader = req.headers.authorization || '';
   if (authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
     const payload = verifyToken(token);
     if (payload && payload.openid) {
-      // token_version 吊销校验：停用/改密/降级后 bump 计数，旧 Token 立即失效。
-      // 行不存在（openid 已轮换 / 账号已删除）同样视为吊销 —— 旧版 u && 短路会放行
-      // 无对应用户行的 Token，令冻结角色最长存活 7 天，架空整条吊销链。
-      // 兜底：查询本身抛异常（库忙等）时放行，不因读库异常把全员踢下线。
+      // token_version revocation: bump on disable / password change / role change
+      // to invalidate old tokens immediately. A missing user row is treated the
+      // same as a revoked token. DB read errors fail open (never mass-log everyone out).
       try {
         const u = db.prepare('SELECT token_version, status FROM users WHERE openid = ?').get(payload.openid);
         if (!u) {
@@ -179,8 +177,8 @@ app.get(/^\/(?!api\/|assets\/|favicon\.ico).*/, (req, res) => {
   res.sendFile(path.join(__dirname, '../web-admin/dist/index.html'));
 });
 
-// 健康检查：附带 DB 探测。进程活着但库坏了（磁盘满/文件损坏）时，
-// 必须报 503，否则 Docker/pm2 健康检查误判为健康、流量继续打到死库。
+// Health check with DB probe: report 503 when the process is alive but the
+// database is unusable, so Docker/pm2 don't route traffic to a dead DB.
 app.get('/api/health', (req, res) => {
   try {
     db.prepare('SELECT 1').get();
@@ -250,10 +248,10 @@ server.on('error', (err) => {
   }
 });
 
-// 进程级错误兜底：
-// - 测试环境（NODE_ENV=test）：仅记录不退出，保证进程内 require('../server') 的测试套件继续跑；
-// - 生产环境：未捕获异常后进程状态不可信（可能半写入/坏连接），记录后退出，
-//   由 pm2 / docker restart 拉起干净实例。静默续跑会让坏状态持续服务、放大故障。
+// Process-level error fallback:
+// - tests (NODE_ENV=test): log only, keep the process alive for require()-based suites;
+// - production: an uncaught exception leaves the process in an unknown state, so
+//   log and exit — pm2 / docker restart will bring up a clean instance.
 process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err && err.stack ? err.stack : err);
   if (process.env.NODE_ENV !== 'test') {

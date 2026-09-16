@@ -7,6 +7,17 @@
 
 **零云服务依赖 · 数据完全归属机构 · clone 后一条命令跑起来**
 
+## English
+
+StarClass is a self-hosted management system for small training and fitness studios: enrollment, scheduling, attendance, parent communication, renewals, points and payroll — in one app. Vue 3 admin console on top of an Express API, all data in a single SQLite file. No cloud services, no subscriptions.
+
+```bash
+git clone https://github.com/Mihooni/edu-admin.git
+cd edu-admin && bash deploy.sh     # installs deps, seeds demo data, builds, starts
+```
+
+Open http://localhost:3001 — admin login `13800000001` / `123456`. Docker deploy for public servers: `./deploy/deploy.sh --host app.yourdomain.com`. Docs below are in Chinese; the UI is Chinese.
+
 ---
 
 ## 🚀 一键部署（30 秒上手）

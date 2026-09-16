@@ -762,8 +762,9 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
       db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?").run(now(), newPhone || oldPhone);
     }
 
-    // 修改权限：同步登录账号角色（coach / admin / sales）与自定义权限
-    // 角色与权限独立更新：仅传权限（不传 role）时也应生效，保证小程序/接口调用兼容
+    // Update permissions: sync the login account's role (coach / admin / sales)
+    // and custom permissions. Role and permissions update independently so a
+    // permissions-only call still takes effect.
     const hasValidRole = role && ['coach', 'admin', 'sales'].includes(role);
     const permUser = targetUser || (targetPhone ? db.prepare('SELECT id FROM users WHERE phone = ?').get(targetPhone) : null);
     if (permUser) {
@@ -774,7 +775,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         updates.push('permissions = ?');
         params.push(Array.isArray(permissions) ? JSON.stringify(permissions) : '');
       }
-      // 角色变更需吊销旧 Token（role 固化在 JWT payload 中，否则降级后旧 Token 仍携带原角色）
+      // Role changes must revoke old tokens — role is baked into the JWT payload
       if (hasValidRole && targetUser && targetUser.role !== role) {
         updates.push('token_version = COALESCE(token_version,0) + 1');
       }
@@ -952,12 +953,8 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
       if (scheds.length) {
         const ph = scheds.map(() => '?').join(',');
         const ids = scheds.map((s) => s.id);
-        // 级联清理排期关联数据，避免孤儿记录（请假/扣课日志/签到积分流水/训练点评）
-        // 删除签到积分流水时同步回滚 points.balance/total_earned——此前只删流水不改余额，
-        // 学员积分账户凭空多出已删除活动的分数，兑换时账实不符。
-        // 旧版只回滚 'earn'，漏掉签到奖励的 'checkin' 发放（见 checkin.js addPoints）；
-        // 回滚额取被删流水的净额 SUM(amount)（含 reversePoints 冲销的负向行，
-        // 只加正数会在「发放后又撤销」的场次上多扣），净额 <=0 的学员无需回滚。
+        // Cascade-clean schedule-related rows. Roll back point logs by net sum
+        // of earn+checkin (including reversal rows) before deleting them.
         const affected = db.prepare(`
           SELECT student_id, SUM(amount) total FROM point_logs
           WHERE type IN ('earn','checkin') AND reference_id IN (${ph}) GROUP BY student_id
