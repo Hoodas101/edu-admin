@@ -1,5 +1,5 @@
 {
-  "name": "edu-admin-backend",
+  "name": "starclass-backend",
   "version": "1.0.1",
   "description": "管理系统后端 — Node.js + Express + SQLite（完全免费）",
   "main": "server.js",
