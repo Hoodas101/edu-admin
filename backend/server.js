@@ -1,5 +1,5 @@
 /**
- * 管理系统后端 — Node.js + Express + SQLite
+ * 星课 StarClass 后端 — Node.js + Express + SQLite
  * 私有化部署，本地运行
  */
 const express = require('express');
@@ -232,7 +232,7 @@ app.use((err, req, res, next) => {
 const server = app.listen(PORT, () => {
   console.log(`
   ╔═══════════════════════════════════════════════╗
-  ║  管理系统后端服务已启动                          ║
+  ║  星课 StarClass 后端服务已启动                     ║
   ║  🚀 http://localhost:${PORT}                    ║
   ║  📋 API 文档: http://localhost:${PORT}/api/health ║
   ╚═══════════════════════════════════════════════╝

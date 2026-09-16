@@ -1,22 +1,13 @@
 # 星课 StarClass · 教培 / 健身机构一体化管理系统
 
-[![CI](https://github.com/Mihooni/edu-admin/actions/workflows/ci.yml/badge.svg)](https://github.com/Mihooni/edu-admin/actions/workflows/ci.yml)
+[![CI](https://github.com/Hoodas101/starclass/actions/workflows/ci.yml/badge.svg)](https://github.com/Hoodas101/starclass/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[🇨🇳 中文](#星课-starclass--教培--健身机构一体化管理系统) · [🇬🇧 English](#english)
 
 > 专为小型与个人教培机构打造的一体化教务产品：**Web 管理后台 + API 后端**，覆盖招生、排课、考勤、家校沟通、销售、续费、薪资结算全流程。克隆即可在自己电脑或服务器一键部署；可选付费扩展提供家长 / 教练 / 管理三端微信小程序。
 
 **零云服务依赖 · 数据完全归属机构 · clone 后一条命令跑起来**
-
-## English
-
-StarClass is a self-hosted management system for small training and fitness studios: enrollment, scheduling, attendance, parent communication, renewals, points and payroll — in one app. Vue 3 admin console on top of an Express API, all data in a single SQLite file. No cloud services, no subscriptions.
-
-```bash
-git clone https://github.com/Mihooni/edu-admin.git
-cd edu-admin && bash deploy.sh     # installs deps, seeds demo data, builds, starts
-```
-
-Open http://localhost:3001 — admin login `13800000001` / `123456`. Docker deploy for public servers: `./deploy/deploy.sh --host app.yourdomain.com`. Docs below are in Chinese; the UI is Chinese.
 
 ---
 
@@ -25,8 +16,8 @@ Open http://localhost:3001 — admin login `13800000001` / `123456`. Docker depl
 **方式 A · 本机 / 旧电脑直接跑（免 Docker）**
 
 ```bash
-git clone https://github.com/Mihooni/edu-admin.git
-cd edu-admin
+git clone https://github.com/Hoodas101/starclass.git
+cd starclass
 bash deploy.sh
 ```
 
@@ -35,8 +26,8 @@ bash deploy.sh
 **方式 B · 正式上线到云服务器（Docker）**
 
 ```bash
-git clone https://github.com/Mihooni/edu-admin.git
-cd edu-admin
+git clone https://github.com/Hoodas101/starclass.git
+cd starclass
 ./deploy/deploy.sh --host app.yourdomain.com   # 自动 HTTPS；内网用 --no-https
 ```
 
@@ -100,7 +91,7 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 家长端 / 教练端 / 管理员端原生小程序（41 页）不随本仓库发布，作为商业扩展单独提供：
 会员身份卡与报名、扫码签到、请假补课、积分商城、订单、成长档案、课后点评、订阅消息提醒（开课/续费/余额）。
 后端 API 已为小程序预留微信登录、支付与订阅消息能力，购买部署授权后即可对接你自己的小程序。
-获取方式：在 [Issues](https://github.com/Mihooni/edu-admin/issues) 留言联系。
+获取方式：在 [Issues](https://github.com/Hoodas101/starclass/issues) 留言联系。
 
 ---
 
@@ -227,6 +218,23 @@ curl http://localhost:3001/api/health
 **中国大陆以外？** 这两个码需要绑定大陆银行卡的微信 / 支付宝，海外朋友多半扫不了。
 国际支付通道（信用卡 / PayPal）正在接入；在那之前，点个 ⭐ Star 或提个 Issue，
 对项目的帮助比想象中大。
+## 🇬🇧 English
+
+StarClass is a self-hosted management system for small training and fitness studios: enrollment, scheduling, attendance, parent communication, renewals, points and payroll — in one app. A Vue 3 admin console on top of an Express API, with all data in a single SQLite file. No cloud services, no subscriptions.
+
+```bash
+git clone https://github.com/Hoodas101/starclass.git
+cd starclass && bash deploy.sh     # installs deps, seeds demo data, builds, starts
+```
+
+Open http://localhost:3001 — admin login `13800000001` / `123456`.
+For a public server: `./deploy/deploy.sh --host app.yourdomain.com` (Docker, auto HTTPS).
+The rest of this README and the admin UI are in Chinese.
+
+[⬆ 返回中文](#星课-starclass--教培--健身机构一体化管理系统)
+
+---
+
 ## 📝 License
 
 MIT
